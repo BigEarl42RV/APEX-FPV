@@ -1,0 +1,6 @@
+{
+  "name": "Stratum FPV",
+  "description": "Realistic 3D FPV drone racing simulator with dual-stick touch RC controller, customizable racing quads, and real-world Google Maps circuit courses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
