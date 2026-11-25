@@ -1,40 +1,112 @@
-import React, { useCallback, useEffect, useRef } from 'react';
-import { Camera, Pause, RotateCcw, Volume2, VolumeX } from 'lucide-react';
-import type { CameraView, FlightMode, StickInputs, StickMode } from '../types/game';
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Camera, Crosshair, Eye, Pause, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import { useDevicePosture } from '../hooks/useDevicePosture';
+import type {
+  CameraView,
+  FlightMode,
+  HudDensityMode,
+  StickInputs,
+  StickMode,
+  TouchSticksMode,
+} from '../types/game';
 
 interface TouchControllerProps {
   stickMode: StickMode;
   flightMode: FlightMode;
   cameraView: CameraView;
+  hudDensity: HudDensityMode;
+  touchSticksMode: TouchSticksMode;
+  gamepadConnected: boolean;
   muted: boolean;
+  showFireButton?: boolean;
+  fireLabel?: string;
   touchSticksRef: React.MutableRefObject<StickInputs>;
+  onFireLaser?: () => void;
   onCycleFlightMode: () => void;
   onToggleCamera: () => void;
+  onToggleHudDensity: () => void;
   onResetDrone: () => void;
   onToggleMute: () => void;
   onPause: () => void;
 }
 
-const PAD_RADIUS = 58; // px travel radius inside 144x144 gimbal housing
-
 export const TouchController: React.FC<TouchControllerProps> = ({
   stickMode,
   flightMode,
   cameraView,
+  hudDensity,
+  touchSticksMode,
+  gamepadConnected,
   muted,
+  showFireButton = false,
+  fireLabel = 'FIRE',
   touchSticksRef,
+  onFireLaser,
   onCycleFlightMode,
   onToggleCamera,
+  onToggleHudDensity,
   onResetDrone,
   onToggleMute,
   onPause,
 }) => {
+  const posture = useDevicePosture();
+  const padRadius = posture.isNarrowCover
+    ? 34
+    : posture.isTablet
+      ? 50
+      : 44;
+  const padDiameterClass = posture.isNarrowCover
+    ? 'w-[88px] h-[88px]'
+    : posture.isTablet
+      ? 'w-32 h-32'
+      : 'w-28 h-28';
+
   const leftKnobRef = useRef<HTMLDivElement | null>(null);
   const rightKnobRef = useRef<HTMLDivElement | null>(null);
   const throttleReadoutRef = useRef<HTMLSpanElement | null>(null);
 
   const leftPointerId = useRef<number | null>(null);
   const rightPointerId = useRef<number | null>(null);
+
+  // Auto-detect touch devices vs desktop keyboard/gamepad
+  const [touchActive, setTouchActive] = useState<boolean>(() =>
+    typeof window !== 'undefined' && window.matchMedia
+      ? window.matchMedia('(pointer: coarse)').matches
+      : false
+  );
+
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') {
+        setTouchActive(true);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.code === 'KeyW' ||
+        e.code === 'KeyS' ||
+        e.code === 'KeyA' ||
+        e.code === 'KeyD' ||
+        e.code.startsWith('Arrow')
+      ) {
+        setTouchActive(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+  const sticksVisible =
+    touchSticksMode === 'always'
+      ? true
+      : touchSticksMode === 'hidden'
+        ? false
+        : (touchActive || posture.isTouchPrimary) && !gamepadConnected;
 
   // Normalized coordinates: x in [-1, 1], y in [-1, 1] (top = +1, bottom = -1)
   const leftPos = useRef({ x: 0, y: stickMode === 'mode2' ? -0.45 : 0 });
@@ -56,21 +128,21 @@ export const TouchController: React.FC<TouchControllerProps> = ({
     touchSticksRef.current.roll = rx;
 
     if (leftKnobRef.current) {
-      leftKnobRef.current.style.transform = `translate3d(${lx * PAD_RADIUS}px, ${-ly * PAD_RADIUS}px, 0)`;
+      leftKnobRef.current.style.transform = `translate3d(${lx * padRadius}px, ${-ly * padRadius}px, 0)`;
     }
     if (rightKnobRef.current) {
-      rightKnobRef.current.style.transform = `translate3d(${rx * PAD_RADIUS}px, ${-ry * PAD_RADIUS}px, 0)`;
+      rightKnobRef.current.style.transform = `translate3d(${rx * padRadius}px, ${-ry * padRadius}px, 0)`;
     }
     if (throttleReadoutRef.current) {
       throttleReadoutRef.current.textContent = `${Math.round(touchSticksRef.current.throttle * 100)}%`;
     }
-  }, [stickMode, touchSticksRef]);
+  }, [padRadius, stickMode, touchSticksRef]);
 
   useEffect(() => {
     leftPos.current = { x: 0, y: stickMode === 'mode2' ? -0.45 : 0 };
     rightPos.current = { x: 0, y: stickMode === 'mode1' ? -0.45 : 0 };
     syncRefsToSticks();
-  }, [stickMode, syncRefsToSticks]);
+  }, [stickMode, sticksVisible, syncRefsToSticks]);
 
   const computeGimbalNorm = (
     el: HTMLElement,
@@ -80,14 +152,13 @@ export const TouchController: React.FC<TouchControllerProps> = ({
     const rect = el.getBoundingClientRect();
     const cx = rect.left + rect.width * 0.5;
     const cy = rect.top + rect.height * 0.5;
-    let dx = (clientX - cx) / PAD_RADIUS;
-    let dy = -(clientY - cy) / PAD_RADIUS; // up is positive
+    let dx = (clientX - cx) / padRadius;
+    let dy = -(clientY - cy) / padRadius;
     const mag = Math.hypot(dx, dy);
     if (mag > 1) {
       dx /= mag;
       dy /= mag;
     }
-    // Subtle 4% center deadzone on self-centering axes
     return {
       x: Math.abs(dx) < 0.04 ? 0 : dx,
       y: dy,
@@ -115,8 +186,7 @@ export const TouchController: React.FC<TouchControllerProps> = ({
   const handleLeftUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (leftPointerId.current !== e.pointerId) return;
     leftPointerId.current = null;
-    leftPos.current.x = 0; // Yaw always self-centers
-    // In Mode 2, throttle (left Y) stays at set position! In Mode 1, left Y is pitch (self-centers)
+    leftPos.current.x = 0;
     if (stickMode === 'mode1') {
       leftPos.current.y = 0;
     }
@@ -144,199 +214,167 @@ export const TouchController: React.FC<TouchControllerProps> = ({
   const handleRightUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (rightPointerId.current !== e.pointerId) return;
     rightPointerId.current = null;
-    rightPos.current.x = 0; // Roll always self-centers
+    rightPos.current.x = 0;
     if (stickMode === 'mode2') {
-      rightPos.current.y = 0; // Pitch self-centers in Mode 2
+      rightPos.current.y = 0;
     }
     syncRefsToSticks();
   };
 
   return (
-    <div className="fixed inset-0 pointer-events-none z-20 flex flex-col justify-between p-3 sm:p-5">
-      {/* Top Action Strip (Shoulder Switches) */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="pointer-events-auto flex items-center gap-1.5 bg-zinc-950/85 border border-zinc-800 rounded-lg p-1">
-          <button
-            type="button"
-            onClick={onCycleFlightMode}
-            className="px-3 py-1.5 text-xs font-semibold tracking-wide text-amber-400 hover:bg-zinc-800 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="Switch Flight Mode (M)"
-          >
-            {flightMode === 'acro'
-              ? 'Acro Rate'
-              : flightMode === 'airmode'
-                ? 'Airmode'
-                : 'Angle Level'}
-          </button>
-          <span className="text-zinc-700" aria-hidden="true">
-            |
-          </span>
-          <button
-            type="button"
-            onClick={onToggleCamera}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="Switch Camera (C)"
-          >
-            <Camera className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{cameraView === 'fpv' ? 'FPV Cam' : 'Chase Cam'}</span>
-          </button>
-        </div>
+    <div className="fixed inset-0 pointer-events-none z-20 flex flex-col justify-end safe-inset-container">
+      <div className="p-2 sm:p-4">
+        {/* Bottom Slim Corner-Friendly Quick Bar + Auto-Hide Touch Gimbals */}
+        <div className="relative flex items-end justify-between gap-1.5 sm:gap-2">
+          {/* Left Translucent Touch Gimbal (Only shown on touch devices or manual override) */}
+          {sticksVisible ? (
+            <div className="pointer-events-auto flex flex-col items-center gap-1 shrink-0">
+              <div className="text-[10px] font-mono-tabular text-zinc-300/90 [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">
+                <span>{stickMode === 'mode2' ? 'THR' : 'PIT'}·YAW</span>
+                {stickMode === 'mode2' && (
+                  <span ref={throttleReadoutRef} className="text-amber-400 ml-1">
+                    28%
+                  </span>
+                )}
+              </div>
+              <div
+                onPointerDown={handleLeftDown}
+                onPointerMove={handleLeftMove}
+                onPointerUp={handleLeftUp}
+                onPointerCancel={handleLeftUp}
+                className={`relative ${padDiameterClass} rounded-full bg-zinc-950/35 border border-white/15 flex items-center justify-center touch-none cursor-grab active:cursor-grabbing`}
+              >
+                <div
+                  ref={leftKnobRef}
+                  className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-zinc-900/90 border border-amber-400/90 shadow flex items-center justify-center pointer-events-none"
+                >
+                  <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div aria-hidden="true" />
+          )}
 
-        <div className="pointer-events-auto flex items-center gap-1.5 bg-zinc-950/85 border border-zinc-800 rounded-lg p-1">
-          <button
-            type="button"
-            onClick={onResetDrone}
-            className="p-2 text-zinc-300 hover:text-white hover:bg-zinc-800 rounded-md transition-colors cursor-pointer"
-            aria-label="Reset Drone"
-            title="Reset to Grid (R)"
+          {/* Whisper-Quiet Compact Action Bar (Stays low out of flight corridor) */}
+          <div
+            className={`pointer-events-auto flex items-center gap-0.5 sm:gap-1 bg-zinc-950/55 hover:bg-zinc-950/90 border border-zinc-800/75 rounded-lg px-1 sm:px-1.5 py-1 transition-opacity ${
+              hudDensity === 'pure'
+                ? 'opacity-30 hover:opacity-100'
+                : 'opacity-65 hover:opacity-100'
+            }`}
           >
-            <RotateCcw className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={onToggleMute}
-            className="p-2 text-zinc-300 hover:text-white hover:bg-zinc-800 rounded-md transition-colors cursor-pointer"
-            aria-label={muted ? 'Unmute Audio' : 'Mute Audio'}
-            title="Toggle Audio"
-          >
-            {muted ? (
-              <VolumeX className="w-4 h-4 text-rose-400" />
-            ) : (
-              <Volume2 className="w-4 h-4 text-emerald-400" />
+            {showFireButton && onFireLaser && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onFireLaser();
+                }}
+                className="flex items-center gap-1 px-2.5 py-1.5 min-h-[36px] text-[11px] font-display font-bold text-zinc-950 bg-rose-500 hover:bg-rose-400 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                title="Fire Pulse (F / Click / RB)"
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                <span>{fireLabel}</span>
+              </button>
             )}
-          </button>
-          <button
-            type="button"
-            onClick={onPause}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-100 bg-zinc-800 hover:bg-zinc-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Pause className="w-3.5 h-3.5" />
-            <span>Pause</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Bottom Dual-Gimbal RC Transmitter Sticks */}
-      <div className="flex items-end justify-between gap-4 pb-1 sm:pb-2">
-        {/* Left Gimbal */}
-        <div className="pointer-events-auto flex flex-col items-center gap-1.5">
-          <div className="flex items-center gap-2 text-[11px] font-mono-tabular text-zinc-300 bg-zinc-950/80 px-2.5 py-0.5 rounded border border-zinc-800">
-            <span>{stickMode === 'mode2' ? 'THR' : 'PIT'}</span>
-            <span className="text-zinc-600">·</span>
-            <span>YAW</span>
-            {stickMode === 'mode2' && (
+            {hudDensity !== 'pure' && (
               <>
-                <span className="text-zinc-600">·</span>
-                <span ref={throttleReadoutRef} className="text-amber-400 font-semibold">
-                  28%
-                </span>
+                <button
+                  type="button"
+                  onClick={onCycleFlightMode}
+                  className="px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-semibold text-amber-400 hover:bg-zinc-800 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Switch Flight Mode (M)"
+                >
+                  {flightMode === 'acro'
+                    ? 'Acro'
+                    : flightMode === 'airmode'
+                      ? 'Air'
+                      : 'Angle'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onToggleCamera}
+                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium text-zinc-200 hover:bg-zinc-800 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Switch Camera (C)"
+                >
+                  <Camera className="w-3 h-3 text-cyan-400" />
+                  <span className="hidden xs:inline sm:inline">
+                    {cameraView === 'fpv' ? 'FPV' : 'Chase'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onResetDrone}
+                  className="p-1.5 text-zinc-300 hover:text-white hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                  aria-label="Reset Drone"
+                  title="Reset to Grid (R)"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={onToggleMute}
+                  className="p-1.5 text-zinc-300 hover:text-white hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                  aria-label={muted ? 'Unmute Audio' : 'Mute Audio'}
+                  title="Toggle Audio"
+                >
+                  {muted ? (
+                    <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                  )}
+                </button>
               </>
             )}
+
+            <button
+              type="button"
+              onClick={onToggleHudDensity}
+              className="flex items-center gap-1 px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium text-zinc-300 hover:text-white hover:bg-zinc-800 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="Toggle Minimal / Pure HUD (H)"
+            >
+              <Eye className="w-3 h-3 text-zinc-400" />
+              <span className="hidden sm:inline">
+                {hudDensity === 'minimal' ? 'HUD' : 'Pure'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onPause}
+              className="flex items-center gap-1 px-2 py-1.5 text-[10px] sm:text-[11px] font-semibold text-zinc-100 bg-zinc-800/80 hover:bg-zinc-700 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="Pause (Esc)"
+            >
+              <Pause className="w-3 h-3" />
+              <span className="hidden sm:inline">Pause</span>
+            </button>
           </div>
-          <div
-            onPointerDown={handleLeftDown}
-            onPointerMove={handleLeftMove}
-            onPointerUp={handleLeftUp}
-            onPointerCancel={handleLeftUp}
-            className="relative w-36 h-36 sm:w-40 sm:h-40 rounded-2xl bg-zinc-950/80 border border-zinc-700/80 flex items-center justify-center touch-none cursor-grab active:cursor-grabbing"
-          >
-            {/* Gimbal guide rails & throttle notches */}
-            <svg
-              viewBox="0 0 144 144"
-              className="absolute inset-0 w-full h-full pointer-events-none"
-            >
-              <circle
-                cx="72"
-                cy="72"
-                r="58"
-                fill="none"
-                stroke="#27272a"
-                strokeWidth="1.5"
-              />
-              <line x1="72" y1="14" x2="72" y2="130" stroke="#3f3f46" strokeWidth="1" />
-              <line x1="14" y1="72" x2="130" y2="72" stroke="#3f3f46" strokeWidth="1" />
-              {[28, 50, 72, 94, 116].map((yPos) => (
-                <line
-                  key={yPos}
-                  x1="65"
-                  y1={yPos}
-                  x2="79"
-                  y2={yPos}
-                  stroke="#52525b"
-                  strokeWidth="1"
-                />
-              ))}
-            </svg>
-            {/* Machined aluminum gimbal stick head */}
-            <div
-              ref={leftKnobRef}
-              className="w-12 h-12 rounded-full bg-zinc-800 border-2 border-amber-500/90 shadow-lg flex items-center justify-center pointer-events-none"
-            >
-              <div className="w-5 h-5 rounded-full border border-zinc-500 bg-zinc-900 flex items-center justify-center">
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+
+          {/* Right Translucent Touch Gimbal (Only shown on touch devices or manual override) */}
+          {sticksVisible ? (
+            <div className="pointer-events-auto flex flex-col items-center gap-1 shrink-0">
+              <div className="text-[10px] font-mono-tabular text-zinc-300/90 [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">
+                <span>{stickMode === 'mode2' ? 'PIT' : 'THR'}·ROLL</span>
+              </div>
+              <div
+                onPointerDown={handleRightDown}
+                onPointerMove={handleRightMove}
+                onPointerUp={handleRightUp}
+                onPointerCancel={handleRightUp}
+                className={`relative ${padDiameterClass} rounded-full bg-zinc-950/35 border border-white/15 flex items-center justify-center touch-none cursor-grab active:cursor-grabbing`}
+              >
+                <div
+                  ref={rightKnobRef}
+                  className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-zinc-900/90 border border-cyan-400/90 shadow flex items-center justify-center pointer-events-none"
+                >
+                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                </div>
               </div>
             </div>
-          </div>
-        </div>
-
-        {/* Center subtle hint on desktop */}
-        <div className="hidden md:flex items-center gap-2 text-[11px] text-zinc-400 bg-zinc-950/75 border border-zinc-800/80 px-3 py-1 rounded">
-          <span>W/S Throttle</span>
-          <span aria-hidden="true">·</span>
-          <span>A/D Yaw</span>
-          <span aria-hidden="true">·</span>
-          <span>Arrows Pitch/Roll</span>
-          <span aria-hidden="true">·</span>
-          <span>Drag Gimbals</span>
-        </div>
-
-        {/* Right Gimbal */}
-        <div className="pointer-events-auto flex flex-col items-center gap-1.5">
-          <div className="flex items-center gap-2 text-[11px] font-mono-tabular text-zinc-300 bg-zinc-950/80 px-2.5 py-0.5 rounded border border-zinc-800">
-            <span>{stickMode === 'mode2' ? 'PIT' : 'THR'}</span>
-            <span className="text-zinc-600">·</span>
-            <span>ROLL</span>
-          </div>
-          <div
-            onPointerDown={handleRightDown}
-            onPointerMove={handleRightMove}
-            onPointerUp={handleRightUp}
-            onPointerCancel={handleRightUp}
-            className="relative w-36 h-36 sm:w-40 sm:h-40 rounded-2xl bg-zinc-950/80 border border-zinc-700/80 flex items-center justify-center touch-none cursor-grab active:cursor-grabbing"
-          >
-            <svg
-              viewBox="0 0 144 144"
-              className="absolute inset-0 w-full h-full pointer-events-none"
-            >
-              <circle
-                cx="72"
-                cy="72"
-                r="58"
-                fill="none"
-                stroke="#27272a"
-                strokeWidth="1.5"
-              />
-              <circle
-                cx="72"
-                cy="72"
-                r="14"
-                fill="none"
-                stroke="#3f3f46"
-                strokeWidth="1"
-                strokeDasharray="3 3"
-              />
-              <line x1="72" y1="14" x2="72" y2="130" stroke="#3f3f46" strokeWidth="1" />
-              <line x1="14" y1="72" x2="130" y2="72" stroke="#3f3f46" strokeWidth="1" />
-            </svg>
-            <div
-              ref={rightKnobRef}
-              className="w-12 h-12 rounded-full bg-zinc-800 border-2 border-cyan-400/90 shadow-lg flex items-center justify-center pointer-events-none"
-            >
-              <div className="w-5 h-5 rounded-full border border-zinc-500 bg-zinc-900 flex items-center justify-center">
-                <div className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-              </div>
-            </div>
-          </div>
+          ) : (
+            <div aria-hidden="true" />
+          )}
         </div>
       </div>
     </div>

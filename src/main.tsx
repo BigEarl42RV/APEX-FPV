@@ -1,3 +1,4 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';

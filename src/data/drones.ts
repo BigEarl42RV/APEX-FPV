@@ -1,14 +1,26 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 import type {
   ComputedDroneStats,
   DroneCustomization,
   DroneFrameId,
   DroneFrameSpec,
+  FirmwareLevel,
   PlayerGarageState,
   RatesProfile,
   UpgradeCategory,
   UpgradeLevelSpec,
   UpgradeLevels,
 } from '../types/game';
+import { createDefaultGamepadConfig, normalizeGamepadConfig } from '../engine/gamepad';
+import {
+  createDefaultSoftwareLoadout,
+  FIRMWARE_CATALOG,
+  normalizeSoftwareLoadout,
+} from './progression';
+import {
+  STARTER_UNLOCKED_PART_IDS,
+  createStarterCustomBuild,
+} from './droneBuilder';
 
 export const DRONE_FRAMES: DroneFrameSpec[] = [
   {
@@ -188,6 +200,8 @@ export function createInitialGarageState(): PlayerGarageState {
   for (const frame of DRONE_FRAMES) {
     upgradesByFrame[frame.id] = createDefaultUpgrades();
     customizationByFrame[frame.id] = {
+      frameColor: '#27272a',
+      frameFinish: 'matte',
       canopyColor: frame.defaultColors.canopy,
       armAccentColor: frame.defaultColors.accent,
       propColor: frame.defaultColors.prop,
@@ -206,6 +220,46 @@ export function createInitialGarageState(): PlayerGarageState {
     flightMode: 'acro',
     stickMode: 'mode2',
     cameraView: 'fpv',
+    gamepad: createDefaultGamepadConfig('gamepad-standard'),
+    software: createDefaultSoftwareLoadout(),
+    graphicsQuality: 'ultra',
+    unlockedPartIds: [...STARTER_UNLOCKED_PART_IDS],
+    customBuilds: [createStarterCustomBuild()],
+    activeCustomBuildId: null,
+    hudDensity: 'minimal',
+    touchSticksMode: 'auto',
+  };
+}
+
+export function normalizeGarageState(loaded: PlayerGarageState): PlayerGarageState {
+  const base = createInitialGarageState();
+  const unlockedPartIds =
+    Array.isArray(loaded.unlockedPartIds) && loaded.unlockedPartIds.length > 0
+      ? Array.from(new Set([...STARTER_UNLOCKED_PART_IDS, ...loaded.unlockedPartIds]))
+      : base.unlockedPartIds!;
+  const customBuilds =
+    Array.isArray(loaded.customBuilds) && loaded.customBuilds.length > 0
+      ? loaded.customBuilds
+      : base.customBuilds!;
+
+  return {
+    ...base,
+    ...loaded,
+    gamepad: normalizeGamepadConfig(loaded.gamepad),
+    software: normalizeSoftwareLoadout(loaded.software),
+    graphicsQuality: loaded.graphicsQuality ?? 'ultra',
+    hudDensity: loaded.hudDensity === 'pure' ? 'pure' : 'minimal',
+    touchSticksMode:
+      loaded.touchSticksMode === 'always' || loaded.touchSticksMode === 'hidden'
+        ? loaded.touchSticksMode
+        : 'auto',
+    unlockedPartIds,
+    customBuilds,
+    activeCustomBuildId:
+      loaded.activeCustomBuildId &&
+      customBuilds.some((b) => b.id === loaded.activeCustomBuildId)
+        ? loaded.activeCustomBuildId
+        : null,
   };
 }
 
@@ -216,7 +270,8 @@ export function getFrameSpec(id: DroneFrameId): DroneFrameSpec {
 export function computeDroneStats(
   frameId: DroneFrameId,
   upgrades: UpgradeLevels,
-  rates: RatesProfile
+  rates: RatesProfile,
+  firmwareLevel: FirmwareLevel = 0
 ): ComputedDroneStats {
   const frame = getFrameSpec(frameId);
   const motorBoost = UPGRADE_CATALOG.motors.levels[upgrades.motors]?.statBoost ?? 0;
@@ -224,6 +279,8 @@ export function computeDroneStats(
   const propBoost = UPGRADE_CATALOG.props.levels[upgrades.props]?.statBoost ?? 0;
   const frameReduction = UPGRADE_CATALOG.frame.levels[upgrades.frame]?.statBoost ?? 0;
   const fcBoost = UPGRADE_CATALOG.fc.levels[upgrades.fc]?.statBoost ?? 0;
+  const fwSpec = FIRMWARE_CATALOG[firmwareLevel] ?? FIRMWARE_CATALOG[0];
+  const totalFcLock = fcBoost + fwSpec.pidBoost;
 
   const massKg = Number((frame.baseMassKg * (1 - frameReduction)).toFixed(3));
   const maxThrustN = Number(
@@ -242,7 +299,7 @@ export function computeDroneStats(
 
   // Betaflight-like max rate at full deflection
   const maxRateDegS = Math.round(
-    (200 * rates.rcRate) / Math.max(0.12, 1 - rates.superRate) * frame.baseAgility * (1 + fcBoost * 0.18)
+    (200 * rates.rcRate) / Math.max(0.12, 1 - rates.superRate) * frame.baseAgility * (1 + totalFcLock * 0.16)
   );
 
   const batteryWh = Number((frame.baseBatteryWh * (1 + batteryBoost)).toFixed(1));
@@ -259,6 +316,6 @@ export function computeDroneStats(
     flightMinutes,
     armSpanM: frame.armSpanM,
     hasDucts: frame.hasDucts,
-    pidResponsiveness: Number((1 + fcBoost).toFixed(2)),
+    pidResponsiveness: Number((1 + totalFcLock).toFixed(2)),
   };
 }

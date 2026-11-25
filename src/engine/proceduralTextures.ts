@@ -1,3 +1,4 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 import * as THREE from 'three';
 import type { TrackBiome } from '../types/game';
 
@@ -23,9 +24,9 @@ export function createCarbonFiberTextures(maxAnisotropy: number): {
   for (let y = 0; y < size; y += cell) {
     for (let x = 0; x < size; x += cell) {
       const alt = ((x / cell + y / cell) & 1) === 0;
-      cCtx.fillStyle = alt ? '#1f1f24' : '#111115';
+      cCtx.fillStyle = alt ? '#cfcfd8' : '#7b7b86';
       cCtx.fillRect(x, y, cell, cell);
-      cCtx.fillStyle = alt ? '#2c2c34' : '#18181d';
+      cCtx.fillStyle = alt ? '#ededf4' : '#a4a4b0';
       cCtx.fillRect(x + 2, y + 2, cell - 4, cell - 4);
 
       bCtx.fillStyle = alt ? '#c8c8c8' : '#585858';
@@ -201,3 +202,94 @@ export function createContactShadowTexture(): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
+
+/**
+ * Procedural biome PBR detail maps (bumpMap + roughnessMap) for rich surface micro-relief
+ */
+export function createBiomeTerrainDetailMaps(
+  biome: TrackBiome,
+  maxAnisotropy: number
+): { bumpMap: THREE.CanvasTexture; roughnessMap: THREE.CanvasTexture } {
+  const size = 256;
+  const bumpCanvas = document.createElement('canvas');
+  bumpCanvas.width = size;
+  bumpCanvas.height = size;
+  const bCtx = bumpCanvas.getContext('2d')!;
+
+  const roughCanvas = document.createElement('canvas');
+  roughCanvas.width = size;
+  roughCanvas.height = size;
+  const rCtx = roughCanvas.getContext('2d')!;
+
+  bCtx.fillStyle = '#808080';
+  bCtx.fillRect(0, 0, size, size);
+
+  rCtx.fillStyle = biome === 'urban' ? '#a8a8a8' : '#d6d6d6';
+  rCtx.fillRect(0, 0, size, size);
+
+  // Deterministic pattern seeded via simple linear congruential sequence
+  let s = biome === 'alpine' ? 17 : biome === 'desert' ? 43 : biome === 'coastal' ? 79 : 113;
+  const nextRand = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+
+  for (let i = 0; i < 3200; i++) {
+    const x = nextRand() * size;
+    const y = nextRand() * size;
+    const w = biome === 'desert' ? 4 + nextRand() * 14 : 2 + nextRand() * 5;
+    const h = biome === 'desert' ? 1.5 + nextRand() * 3 : 2 + nextRand() * 5;
+    const bright = nextRand() > 0.5;
+
+    bCtx.fillStyle = bright ? 'rgba(235,235,235,0.28)' : 'rgba(25,25,25,0.28)';
+    bCtx.fillRect(x, y, w, h);
+
+    rCtx.fillStyle =
+      biome === 'urban'
+        ? bright
+          ? 'rgba(245,245,245,0.22)'
+          : 'rgba(95,95,95,0.32)'
+        : bright
+          ? 'rgba(255,255,255,0.2)'
+          : 'rgba(130,130,130,0.25)';
+    rCtx.fillRect(x, y, w, h);
+  }
+
+  if (biome === 'urban') {
+    // Concrete expansion joint seams with lower roughness specular edge
+    bCtx.strokeStyle = 'rgba(20,20,20,0.55)';
+    bCtx.lineWidth = 2;
+    rCtx.strokeStyle = 'rgba(85,85,85,0.45)';
+    rCtx.lineWidth = 2;
+    for (let i = 0; i <= size; i += 64) {
+      bCtx.beginPath();
+      bCtx.moveTo(i, 0);
+      bCtx.lineTo(i, size);
+      bCtx.stroke();
+      bCtx.beginPath();
+      bCtx.moveTo(0, i);
+      bCtx.lineTo(size, i);
+      bCtx.stroke();
+
+      rCtx.beginPath();
+      rCtx.moveTo(i, 0);
+      rCtx.lineTo(i, size);
+      rCtx.stroke();
+    }
+  }
+
+  const bumpMap = new THREE.CanvasTexture(bumpCanvas);
+  bumpMap.wrapS = THREE.RepeatWrapping;
+  bumpMap.wrapT = THREE.RepeatWrapping;
+  bumpMap.repeat.set(36, 36);
+  bumpMap.anisotropy = maxAnisotropy;
+
+  const roughnessMap = new THREE.CanvasTexture(roughCanvas);
+  roughnessMap.wrapS = THREE.RepeatWrapping;
+  roughnessMap.wrapT = THREE.RepeatWrapping;
+  roughnessMap.repeat.set(36, 36);
+  roughnessMap.anisotropy = maxAnisotropy;
+
+  return { bumpMap, roughnessMap };
+}
+

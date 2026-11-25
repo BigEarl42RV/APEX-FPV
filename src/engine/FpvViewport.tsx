@@ -1,12 +1,23 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type {
   CameraView,
   ComputedDroneStats,
   DroneCustomization,
   DroneFrameId,
+  DroneVisualBlueprint,
   FlightMode,
+  GamepadConfig,
+  GhostKeyframe,
+  GhostRecording,
+  GoggleFeedMode,
+  GraphicsQuality,
   RatesProfile,
   ScreenMode,
   StickInputs,
@@ -14,7 +25,11 @@ import type {
   TrackDef,
 } from '../types/game';
 import { buildProceduralDroneModel, type DroneModelHandles } from './droneMesh';
-import { buildTrackEnvironment, getBiomeAtmosphere, type BuiltTrackScene } from './trackBuilder';
+import {
+  buildTrackEnvironment,
+  getBiomeAtmosphere,
+  type BuiltTrackScene,
+} from './trackBuilder';
 import { createContactShadowTexture } from './proceduralTextures';
 import {
   createInitialPhysicsState,
@@ -23,16 +38,84 @@ import {
 } from './physics';
 import { fpvAudio } from './audio';
 import { sampleTrackTerrainHeight } from '../data/tracks';
+import { createGamepadPollOut, pollGamepadInto } from './gamepad';
+import { sampleGhostPoseAtTimeInto } from '../data/progression';
+import {
+  buildAtmosphericSkyDome,
+  buildGhostDroneMesh,
+  createAeroTrailSystem,
+  createGateShockwavePool,
+  createSpeedLinesEffect,
+  type AeroRibbonHandle,
+  type AtmosphericSkyHandle,
+  type GhostDroneHandle,
+  type ShockwavePoolHandle,
+  type SpeedLinesHandle,
+} from './skyAndEffects';
+import {
+  createMultiplayerVisualSystem,
+  type MultiplayerVisualSystem,
+} from './multiplayerVisuals';
+import type {
+  LaserBeamVisual,
+  MultiplayerModeId,
+  MultiplayerPose,
+} from '../types/multiplayer';
+
+export interface MultiplayerViewportConfig {
+  active: boolean;
+  mode: MultiplayerModeId;
+  localPlayerId: string | null;
+  spectatingFollowLeader: boolean;
+  spectateTargetId: string | null;
+  laserCooldownMs: number;
+  arenaSpawnIndex: number;
+  arenaTotalSlots: number;
+  remotePoses: Map<string, MultiplayerPose>;
+  pendingLaserBeams: LaserBeamVisual[];
+  fireTriggerRef?: React.MutableRefObject<(() => void) | null>;
+  onPublishPose: (pose: {
+    x: number;
+    y: number;
+    z: number;
+    qx: number;
+    qy: number;
+    qz: number;
+    qw: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    lap: number;
+    gateIndex: number;
+  }) => void;
+  onFireLaser: (
+    origin: [number, number, number],
+    dir: [number, number, number]
+  ) => void;
+  onReportProgress: (lap: number, gateIndex: number, cleanGates: number) => void;
+}
 
 export interface FpvViewportProps {
   screenMode: ScreenMode;
   track: TrackDef;
   frameId: DroneFrameId;
+  visualBlueprint?: DroneVisualBlueprint;
+  benchInspectActive?: boolean;
+  benchExploded?: boolean;
+  benchCameraResetKey?: number;
   customization: DroneCustomization;
   stats: ComputedDroneStats;
   rates: RatesProfile;
   flightMode: FlightMode;
   cameraView: CameraView;
+  gamepadConfig: GamepadConfig;
+  graphicsQuality: GraphicsQuality;
+  maxDpr?: number;
+  goggleMode: GoggleFeedMode;
+  racingLineEnabled: boolean;
+  propwashDamping: number;
+  activeGhost: GhostRecording | null;
+  multiplayer?: MultiplayerViewportConfig | null;
   touchSticksRef: React.MutableRefObject<StickInputs>;
   raceRunId: number;
   onTelemetry: (snap: TelemetrySnapshot) => void;
@@ -42,10 +125,21 @@ export interface FpvViewportProps {
     bestLapMs: number;
     lapTimesMs: number[];
     cleanGates: number;
+    maxSpeedKmh: number;
+    flightDurationSec: number;
+    distanceKm: number;
+    recordedGhostFrames: GhostKeyframe[];
   }) => void;
+  onFlightSessionAccumulate?: (
+    flightSeconds: number,
+    distanceKm: number,
+    maxSpeedKmh: number
+  ) => void;
   onTogglePause: () => void;
   onQuickSwitchCam: () => void;
   onQuickSwitchMode: () => void;
+  onQuickToggleHud?: () => void;
+  onGamepadStatus?: (status: { connected: boolean; id: string }) => void;
 }
 
 // Pre-allocated scratch objects for zero GC inside requestAnimationFrame
@@ -53,12 +147,18 @@ const _camOffset = new THREE.Vector3();
 const _camTargetPos = new THREE.Vector3();
 const _lookTarget = new THREE.Vector3();
 const _forward = new THREE.Vector3();
+const _chaseLift = new THREE.Vector3(0, 0.58, 0);
 const _tiltQuat = new THREE.Quaternion();
 const _axisX = new THREE.Vector3(1, 0, 0);
 const _gateVec = new THREE.Vector3();
+const _prevGateVec = new THREE.Vector3();
 const _localGate = new THREE.Vector3();
 const _invQuat = new THREE.Quaternion();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _tipLeft = new THREE.Vector3();
+const _tipRight = new THREE.Vector3();
+const _ghostPos = new THREE.Vector3();
+const _ghostQuat = new THREE.Quaternion();
 
 interface ParticleBurstItem {
   active: boolean;
@@ -72,62 +172,112 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
   screenMode,
   track,
   frameId,
+  visualBlueprint,
+  benchInspectActive = false,
+  benchExploded = false,
+  benchCameraResetKey = 0,
   customization,
   stats,
   rates,
   flightMode,
   cameraView,
+  gamepadConfig,
+  graphicsQuality,
+  maxDpr = 2,
+  goggleMode,
+  racingLineEnabled,
+  propwashDamping,
+  activeGhost = null,
+  multiplayer = null,
   touchSticksRef,
   raceRunId,
   onTelemetry,
   onGatePassed,
   onRaceFinished,
+  onFlightSessionAccumulate,
   onTogglePause,
   onQuickSwitchCam,
   onQuickSwitchMode,
+  onQuickToggleHud,
+  onGamepadStatus,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
 
-  // Store latest props in refs so the WebGL loop never tears down on UI updates
   const propsRef = useRef({
     screenMode,
     track,
     frameId,
+    visualBlueprint,
+    benchInspectActive,
+    benchExploded,
     customization,
     stats,
     rates,
     flightMode,
     cameraView,
+    gamepadConfig,
+    graphicsQuality,
+    maxDpr,
+    goggleMode,
+    racingLineEnabled,
+    propwashDamping,
+    activeGhost,
+    multiplayer,
     onTelemetry,
     onGatePassed,
     onRaceFinished,
+    onFlightSessionAccumulate,
     onTogglePause,
     onQuickSwitchCam,
     onQuickSwitchMode,
+    onQuickToggleHud,
+    onGamepadStatus,
   });
   propsRef.current = {
     screenMode,
     track,
     frameId,
+    visualBlueprint,
+    benchInspectActive,
+    benchExploded,
     customization,
     stats,
     rates,
     flightMode,
     cameraView,
+    gamepadConfig,
+    graphicsQuality,
+    maxDpr,
+    goggleMode,
+    racingLineEnabled,
+    propwashDamping,
+    activeGhost,
+    multiplayer,
     onTelemetry,
     onGatePassed,
     onRaceFinished,
+    onFlightSessionAccumulate,
     onTogglePause,
     onQuickSwitchCam,
     onQuickSwitchMode,
+    onQuickToggleHud,
+    onGamepadStatus,
   };
 
   const sceneRefs = useRef<{
     scene: THREE.Scene;
     renderer: THREE.WebGLRenderer;
+    composer: EffectComposer | null;
+    bloomPass: UnrealBloomPass | null;
     camera: THREE.PerspectiveCamera;
     droneHandle: DroneModelHandles | null;
     trackHandle: BuiltTrackScene | null;
+    skyHandle: AtmosphericSkyHandle;
+    aeroTrails: AeroRibbonHandle;
+    shockwaves: ShockwavePoolHandle;
+    speedLines: SpeedLinesHandle;
+    ghostMesh: GhostDroneHandle;
+    mpVisuals: MultiplayerVisualSystem;
     physics: DronePhysicsState;
     sunLight: THREE.DirectionalLight;
     hemiLight: THREE.HemisphereLight;
@@ -137,10 +287,30 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     countdownTimer: number;
     lastCountdownBeep: number;
     elapsedRaceMs: number;
+    lastGhostSampleMs: number;
+    recordedGhostFrames: GhostKeyframe[];
     resetCurrentRace: () => void;
   } | null>(null);
 
-  // Rebuild drone mesh when frame or customization changes without touching renderer
+  const benchOrbitRef = useRef({
+    yaw: 0.65,
+    pitch: 0.34,
+    distance: 0.62,
+    dragging: false,
+    userInteracted: false,
+    lastX: 0,
+    lastY: 0,
+    explodedValue: 0,
+  });
+
+  useEffect(() => {
+    benchOrbitRef.current.yaw = 0.65;
+    benchOrbitRef.current.pitch = 0.34;
+    benchOrbitRef.current.distance = 0.62;
+    benchOrbitRef.current.userInteracted = false;
+  }, [benchCameraResetKey]);
+
+  // Rebuild drone mesh only when frame or structural blueprint changes
   useEffect(() => {
     const s = sceneRefs.current;
     if (!s) return;
@@ -149,15 +319,36 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       s.scene.remove(s.droneHandle.root);
       s.droneHandle.dispose();
     }
+    const cust = propsRef.current.customization;
     const nextDrone = buildProceduralDroneModel(
       frameId,
-      customization,
+      cust,
       s.maxAnisotropy,
-      s.isSoftwareGl
+      s.isSoftwareGl,
+      visualBlueprint
     );
+    nextDrone.setExploded(benchOrbitRef.current.explodedValue);
     s.scene.add(nextDrone.root);
     s.droneHandle = nextDrone;
-  }, [frameId, customization]);
+    s.aeroTrails.setColor(cust.ledColor);
+  }, [frameId, visualBlueprint]);
+
+  // Live zero-GC material & camera-tilt updates for smooth 60fps color picker scrubbing
+  useEffect(() => {
+    const s = sceneRefs.current;
+    if (!s || !s.droneHandle) return;
+    const dh = s.droneHandle;
+    dh.materials.frame.color.set(customization.frameColor ?? '#27272a');
+    dh.setFrameFinish(customization.frameFinish ?? 'matte');
+    dh.materials.canopy.color.set(customization.canopyColor);
+    dh.materials.accent.color.set(customization.armAccentColor);
+    dh.materials.prop.color.set(customization.propColor);
+    dh.materials.blurDisc.color.set(customization.propColor);
+    dh.materials.led.color.set(customization.ledColor);
+    dh.materials.led.emissive.set(customization.ledColor);
+    dh.setCameraTilt(customization.cameraTiltDeg);
+    s.aeroTrails.setColor(customization.ledColor);
+  }, [customization]);
 
   // Rebuild track environment when track changes
   useEffect(() => {
@@ -169,6 +360,8 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       s.trackHandle.dispose();
     }
     const nextTrack = buildTrackEnvironment(track, s.maxAnisotropy);
+    nextTrack.setRacingLineVisible(propsRef.current.racingLineEnabled);
+    nextTrack.setWaterVisible(propsRef.current.graphicsQuality !== 'performance');
     s.scene.add(nextTrack.group);
     s.trackHandle = nextTrack;
 
@@ -182,6 +375,51 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     s.resetCurrentRace();
   }, [track]);
 
+  // Apply Quality Preset & Avionics HUD toggles live without tearing down scene
+  useEffect(() => {
+    const s = sceneRefs.current;
+    if (!s) return;
+
+    const isPerf = graphicsQuality === 'performance' || s.isSoftwareGl;
+    const cap = Math.max(1, maxDpr);
+    const targetDpr = s.isSoftwareGl
+      ? 1
+      : graphicsQuality === 'ultra'
+        ? Math.min(window.devicePixelRatio, cap)
+        : graphicsQuality === 'high'
+          ? Math.min(window.devicePixelRatio, Math.min(cap, 1.5))
+          : 1;
+
+    s.renderer.setPixelRatio(targetDpr);
+    const w = s.renderer.domElement.parentElement?.clientWidth || window.innerWidth;
+    const h = Math.max(1, s.renderer.domElement.parentElement?.clientHeight || window.innerHeight);
+    s.renderer.setSize(w, h);
+    s.composer?.setSize(w, h);
+
+    s.renderer.shadowMap.enabled = !isPerf;
+    s.sunLight.castShadow = !isPerf;
+
+    if (s.bloomPass) {
+      s.bloomPass.enabled = !isPerf;
+      s.bloomPass.strength = graphicsQuality === 'ultra' ? 0.62 : 0.42;
+      s.bloomPass.radius = graphicsQuality === 'ultra' ? 0.48 : 0.34;
+    }
+
+    s.renderer.toneMappingExposure =
+      goggleMode === 'action-raw' ? 1.18 : goggleMode === 'analog-raceband' ? 1.03 : 1.09;
+
+    s.trackHandle?.setRacingLineVisible(racingLineEnabled);
+    s.trackHandle?.setWaterVisible(graphicsQuality !== 'performance');
+    s.aeroTrails.group.visible = graphicsQuality !== 'performance';
+  }, [graphicsQuality, maxDpr, goggleMode, racingLineEnabled]);
+
+  // Update ghost hologram tint when rival type changes
+  useEffect(() => {
+    const s = sceneRefs.current;
+    if (!s || !activeGhost) return;
+    s.ghostMesh.setModeColor(Boolean(activeGhost.isProTarget));
+  }, [activeGhost]);
+
   // Reset physics cleanly when a new raceRunId begins
   useEffect(() => {
     const s = sceneRefs.current;
@@ -193,7 +431,6 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     const container = mountRef.current;
     if (!container) return;
 
-    // Detect Software WebGL (SwiftShader/llvmpipe/WARP) strictly for rendering cost
     const isSoftwareGl = (() => {
       try {
         const probe = document.createElement('canvas').getContext('webgl2');
@@ -208,22 +445,36 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       }
     })();
 
+    const initQuality = propsRef.current.graphicsQuality;
+    const initPerf = initQuality === 'performance' || isSoftwareGl;
+
     const renderer = new THREE.WebGLRenderer({
       antialias: !isSoftwareGl,
       powerPreference: 'high-performance',
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
+    renderer.toneMappingExposure = 1.09;
+    const cap = Math.max(1, propsRef.current.maxDpr);
     renderer.setPixelRatio(
-      isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2)
+      isSoftwareGl
+        ? 1
+        : initQuality === 'ultra'
+          ? Math.min(window.devicePixelRatio, cap)
+          : initQuality === 'high'
+            ? Math.min(window.devicePixelRatio, Math.min(cap, 1.5))
+            : 1
     );
-    renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
-    renderer.shadowMap.enabled = !isSoftwareGl;
+
+    const initW = container.clientWidth || window.innerWidth;
+    const initH = Math.max(1, container.clientHeight || window.innerHeight);
+    renderer.setSize(initW, initH);
+    renderer.shadowMap.enabled = !initPerf;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
+    renderer.domElement.style.touchAction = 'none';
     container.appendChild(renderer.domElement);
 
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -239,21 +490,36 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     scene.environment = envTex;
     pmremGenerator.dispose();
 
-    const camera = new THREE.PerspectiveCamera(
-      95,
-      (container.clientWidth || window.innerWidth) /
-        Math.max(1, container.clientHeight || window.innerHeight),
-      0.08,
-      900
-    );
+    const camera = new THREE.PerspectiveCamera(95, initW / initH, 0.08, 950);
+
+    // Post-processing EffectComposer with selective high-threshold UnrealBloom + OutputPass (GPU only)
+    let composer: EffectComposer | null = null;
+    let bloomPass: UnrealBloomPass | null = null;
+    if (!isSoftwareGl) {
+      composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(Math.max(1, Math.floor(initW / 2)), Math.max(1, Math.floor(initH / 2))),
+        initQuality === 'ultra' ? 0.62 : 0.42,
+        0.44,
+        0.86
+      );
+      bloomPass.enabled = !initPerf;
+      composer.addPass(bloomPass);
+      composer.addPass(new OutputPass());
+    }
+
+    // Dynamic GLSL Atmospheric Sky Dome
+    const skyHandle = buildAtmosphericSkyDome(propsRef.current.track.biome);
+    scene.add(skyHandle.mesh);
 
     // 3-Point Studio / Outdoor Lighting Rig
-    const hemiLight = new THREE.HemisphereLight(atmo.hemiSky, atmo.hemiGround, 0.72);
+    const hemiLight = new THREE.HemisphereLight(atmo.hemiSky, atmo.hemiGround, 0.78);
     scene.add(hemiLight);
 
-    const sunLight = new THREE.DirectionalLight(atmo.sunColor, 1.9);
+    const sunLight = new THREE.DirectionalLight(atmo.sunColor, 2.05);
     sunLight.position.set(85, 140, 65);
-    sunLight.castShadow = !isSoftwareGl;
+    sunLight.castShadow = !initPerf;
     sunLight.shadow.mapSize.width = 2048;
     sunLight.shadow.mapSize.height = 2048;
     const d = 140;
@@ -267,7 +533,7 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     sunLight.shadow.normalBias = 0.02;
     scene.add(sunLight);
 
-    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.55);
+    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.62);
     rimLight.position.set(-70, 55, -85);
     scene.add(rimLight);
 
@@ -319,8 +585,30 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       }
     };
 
+    // Wingtip Aero Trails, Gate Shockwaves, Speed Lines & Holographic Ghost Rival
+    const aeroTrails = createAeroTrailSystem(propsRef.current.customization.ledColor);
+    aeroTrails.group.visible = initQuality !== 'performance';
+    scene.add(aeroTrails.group);
+
+    const shockwaves = createGateShockwavePool();
+    scene.add(shockwaves.group);
+
+    const speedLines = createSpeedLinesEffect();
+    scene.add(speedLines.lines);
+
+    const ghostMesh = buildGhostDroneMesh();
+    if (propsRef.current.activeGhost) {
+      ghostMesh.setModeColor(Boolean(propsRef.current.activeGhost.isProTarget));
+    }
+    scene.add(ghostMesh.root);
+
+    const mpVisuals = createMultiplayerVisualSystem(maxAnisotropy, isSoftwareGl);
+    scene.add(mpVisuals.group);
+
     // Build initial track & drone
     const trackHandle = buildTrackEnvironment(propsRef.current.track, maxAnisotropy);
+    trackHandle.setRacingLineVisible(propsRef.current.racingLineEnabled);
+    trackHandle.setWaterVisible(initQuality !== 'performance');
     scene.add(trackHandle.group);
 
     const droneHandle = buildProceduralDroneModel(
@@ -335,30 +623,95 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       propsRef.current.track,
       propsRef.current.stats
     );
+    aeroTrails.reset(initialPhysics.position);
+
+    let unflushedFlightSec = 0;
+    let unflushedDistM = 0;
+    let unflushedMaxSpeedKmh = 0;
+    let wasPlayingMode = false;
+
+    const flushUnflushedFlight = () => {
+      if (unflushedFlightSec >= 2) {
+        propsRef.current.onFlightSessionAccumulate?.(
+          Number(unflushedFlightSec.toFixed(1)),
+          Number((unflushedDistM / 1000).toFixed(3)),
+          Math.round(unflushedMaxSpeedKmh)
+        );
+      }
+      unflushedFlightSec = 0;
+      unflushedDistM = 0;
+      unflushedMaxSpeedKmh = 0;
+    };
 
     const refsObj = {
       scene,
       renderer,
+      composer,
+      bloomPass,
       camera,
       droneHandle,
       trackHandle,
+      skyHandle,
+      aeroTrails,
+      shockwaves,
+      speedLines,
+      ghostMesh,
+      mpVisuals,
       physics: initialPhysics,
       sunLight,
       hemiLight,
       contactShadow,
       maxAnisotropy,
       isSoftwareGl,
-      countdownTimer: 3.0,
-      lastCountdownBeep: 4,
+      countdownTimer: 2.6,
+      lastCountdownBeep: 3,
       elapsedRaceMs: 0,
+      lastGhostSampleMs: -100,
+      recordedGhostFrames: [] as GhostKeyframe[],
       resetCurrentRace: () => {
-        refsObj.physics = createInitialPhysicsState(
+        flushUnflushedFlight();
+        const mp = propsRef.current.multiplayer;
+        const freshPhys = createInitialPhysicsState(
           propsRef.current.track,
           propsRef.current.stats
         );
-        refsObj.countdownTimer = 2.6;
-        refsObj.lastCountdownBeep = 3;
+        if (
+          mp?.active &&
+          (mp.mode === 'laser-tag' || mp.mode === 'drone-tag')
+        ) {
+          const idx = Math.max(0, mp.arenaSpawnIndex);
+          const total = Math.max(2, mp.arenaTotalSlots);
+          const ang = (idx / total) * Math.PI * 2;
+          const radius = 58 + (idx % 2) * 18;
+          const sx = Math.cos(ang) * radius;
+          const sz = Math.sin(ang) * radius;
+          const gy = sampleTrackTerrainHeight(sx, sz, propsRef.current.track);
+          freshPhys.position.set(sx, gy + 7.5, sz);
+          freshPhys.prevPosition.copy(freshPhys.position);
+          freshPhys.quaternion.setFromAxisAngle(
+            new THREE.Vector3(0, 1, 0),
+            Math.atan2(-sx, -sz) + Math.PI
+          );
+        } else if (mp?.active && mp.arenaSpawnIndex > 0) {
+          const g0 = propsRef.current.track.gates[0];
+          const h = g0 ? g0.headingRad : 0;
+          const rightX = Math.cos(h);
+          const rightZ = -Math.sin(h);
+          const fwdX = Math.sin(h);
+          const fwdZ = Math.cos(h);
+          const col = (mp.arenaSpawnIndex % 4) - 1.5;
+          const row = Math.floor(mp.arenaSpawnIndex / 4);
+          freshPhys.position.x += rightX * (col * 2.8) - fwdX * (row * 3.2);
+          freshPhys.position.z += rightZ * (col * 2.8) - fwdZ * (row * 3.2);
+          freshPhys.prevPosition.copy(freshPhys.position);
+        }
+        refsObj.physics = freshPhys;
+        refsObj.countdownTimer = mp?.active ? 0.8 : 2.6;
+        refsObj.lastCountdownBeep = mp?.active ? 1 : 3;
         refsObj.elapsedRaceMs = 0;
+        refsObj.lastGhostSampleMs = -100;
+        refsObj.recordedGhostFrames = [];
+        refsObj.aeroTrails.reset(refsObj.physics.position);
       },
     };
     sceneRefs.current = refsObj;
@@ -367,9 +720,41 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       renderer.compile(scene, camera);
     }
 
-    // Keyboard state (isolated from React renders, cleared on blur)
+    // Keyboard & Combat Pulse state
     const heldKeys: Record<string, boolean> = {};
     let kbThrottle = 0.28;
+    let lastLocalFirePerfMs = 0;
+
+    const tryFireMultiplayerPulse = () => {
+      const mp = propsRef.current.multiplayer;
+      if (
+        propsRef.current.screenMode !== 'playing' ||
+        !mp?.active ||
+        mp.spectatingFollowLeader ||
+        (mp.mode !== 'laser-tag' && mp.mode !== 'drone-tag') ||
+        refsObj.countdownTimer > 0
+      ) {
+        return;
+      }
+      const nowPerf = performance.now();
+      if (nowPerf - lastLocalFirePerfMs < Math.max(220, mp.laserCooldownMs)) {
+        return;
+      }
+      lastLocalFirePerfMs = nowPerf;
+      const phys = refsObj.physics;
+      _tiltQuat.setFromAxisAngle(
+        _axisX,
+        THREE.MathUtils.degToRad(propsRef.current.customization.cameraTiltDeg)
+      );
+      _forward
+        .set(0, 0, -1)
+        .applyQuaternion(phys.quaternion.clone().multiply(_tiltQuat))
+        .normalize();
+      mp.onFireLaser(
+        [phys.position.x, phys.position.y + 0.05, phys.position.z],
+        [_forward.x, _forward.y, _forward.z]
+      );
+    };
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
@@ -393,6 +778,10 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
           propsRef.current.onQuickSwitchCam();
         } else if (e.code === 'KeyM') {
           propsRef.current.onQuickSwitchMode();
+        } else if (e.code === 'KeyH') {
+          propsRef.current.onQuickToggleHud?.();
+        } else if (e.code === 'KeyF') {
+          tryFireMultiplayerPulse();
         }
       }
     };
@@ -411,11 +800,55 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('blur', handleBlur);
 
-    // WebGL context loss/restored listeners
     const onContextLost = (ev: Event) => {
       ev.preventDefault();
     };
+    const onCanvasContextMenu = (ev: MouseEvent) => {
+      ev.preventDefault();
+    };
+    const onCanvasPointerDown = (ev: PointerEvent) => {
+      if (
+        propsRef.current.screenMode === 'playing' &&
+        ev.pointerType !== 'touch' &&
+        ev.button === 0
+      ) {
+        tryFireMultiplayerPulse();
+        return;
+      }
+      if (propsRef.current.screenMode !== 'garage') return;
+      benchOrbitRef.current.dragging = true;
+      benchOrbitRef.current.userInteracted = true;
+      benchOrbitRef.current.lastX = ev.clientX;
+      benchOrbitRef.current.lastY = ev.clientY;
+    };
+    const onWindowPointerMove = (ev: PointerEvent) => {
+      const orbit = benchOrbitRef.current;
+      if (!orbit.dragging || propsRef.current.screenMode !== 'garage') return;
+      const dx = ev.clientX - orbit.lastX;
+      const dy = ev.clientY - orbit.lastY;
+      orbit.lastX = ev.clientX;
+      orbit.lastY = ev.clientY;
+      orbit.yaw -= dx * 0.0085;
+      orbit.pitch = THREE.MathUtils.clamp(orbit.pitch + dy * 0.0065, -0.35, 1.2);
+    };
+    const onWindowPointerUp = () => {
+      benchOrbitRef.current.dragging = false;
+    };
+    const onCanvasWheel = (ev: WheelEvent) => {
+      if (propsRef.current.screenMode !== 'garage') return;
+      ev.preventDefault();
+      benchOrbitRef.current.distance = THREE.MathUtils.clamp(
+        benchOrbitRef.current.distance + ev.deltaY * 0.0005,
+        0.38,
+        1.25
+      );
+    };
     renderer.domElement.addEventListener('webglcontextlost', onContextLost);
+    renderer.domElement.addEventListener('contextmenu', onCanvasContextMenu);
+    renderer.domElement.addEventListener('pointerdown', onCanvasPointerDown);
+    renderer.domElement.addEventListener('wheel', onCanvasWheel, { passive: false });
+    window.addEventListener('pointermove', onWindowPointerMove);
+    window.addEventListener('pointerup', onWindowPointerUp);
 
     const handleResize = () => {
       if (!container) return;
@@ -424,8 +857,17 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
+      composer?.setSize(w, h);
     };
     window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleResize);
+    window.visualViewport?.addEventListener('resize', handleResize);
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => handleResize())
+        : null;
+    resizeObserver?.observe(container);
 
     // Animation loop with Software WebGL pacing
     let frameIdRef = 0;
@@ -434,6 +876,11 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
     let totalElapsed = 0;
     let lastTelemetryPush = 0;
     let finishedSent = false;
+
+    const gamepadOut = createGamepadPollOut();
+    const gamepadPrevButtons: boolean[] = [];
+    let lastReportedPadConnected = false;
+    let lastReportedPadId = '';
 
     const smoothedChasePos = new THREE.Vector3().copy(initialPhysics.position);
 
@@ -468,11 +915,46 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
         rates: activeRates,
         flightMode: activeFlightMode,
         cameraView: activeCamView,
+        gamepadConfig: activeGamepadConfig,
+        graphicsQuality: quality,
+        propwashDamping: fwDamping,
+        activeGhost: ghostRec,
+        multiplayer: mpConfig,
       } = propsRef.current;
+
+      if (mpConfig?.fireTriggerRef) {
+        mpConfig.fireTriggerRef.current = tryFireMultiplayerPulse;
+      }
 
       const phys = refsObj.physics;
 
-      // Combine keyboard + touch controller stick inputs
+      // Poll hardware USB RC transmitter / Gamepad at 60fps
+      pollGamepadInto(activeGamepadConfig, gamepadPrevButtons, gamepadOut);
+      if (
+        gamepadOut.connected !== lastReportedPadConnected ||
+        gamepadOut.id !== lastReportedPadId
+      ) {
+        lastReportedPadConnected = gamepadOut.connected;
+        lastReportedPadId = gamepadOut.id;
+        propsRef.current.onGamepadStatus?.({
+          connected: gamepadOut.connected,
+          id: gamepadOut.id,
+        });
+      }
+
+      if (gamepadOut.triggerPause && (mode === 'playing' || mode === 'paused')) {
+        propsRef.current.onTogglePause();
+      }
+      if (mode === 'playing') {
+        if (gamepadOut.triggerSwitchCam) propsRef.current.onQuickSwitchCam();
+        if (gamepadOut.triggerCycleMode) propsRef.current.onQuickSwitchMode();
+        if (gamepadOut.triggerFire) tryFireMultiplayerPulse();
+        if (gamepadOut.triggerReset) {
+          refsObj.resetCurrentRace();
+          kbThrottle = 0.28;
+        }
+      }
+
       const touch = touchSticksRef.current;
       const kbActive =
         heldKeys['KeyW'] ||
@@ -492,21 +974,46 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
         kbThrottle = Math.max(0, kbThrottle - dt * 0.78);
       }
 
+      const useGamepad =
+        gamepadOut.connected &&
+        activeGamepadConfig.enabled &&
+        (gamepadOut.active || activeGamepadConfig.preset === 'rc-radio') &&
+        !kbActive;
+
       const combinedSticks: StickInputs = {
-        throttle: kbActive ? Math.max(touch.throttle, kbThrottle) : touch.throttle,
+        throttle: kbActive
+          ? Math.max(touch.throttle, kbThrottle)
+          : useGamepad
+            ? gamepadOut.sticks.throttle
+            : touch.throttle,
         yaw:
-          (heldKeys['KeyD'] ? 1 : 0) -
-          (heldKeys['KeyA'] ? 1 : 0) || touch.yaw,
+          (heldKeys['KeyD'] ? 1 : 0) - (heldKeys['KeyA'] ? 1 : 0) ||
+          (useGamepad ? gamepadOut.sticks.yaw : 0) ||
+          touch.yaw,
         pitch:
-          (heldKeys['ArrowUp'] ? 1 : 0) -
-          (heldKeys['ArrowDown'] ? 1 : 0) || touch.pitch,
+          (heldKeys['ArrowUp'] ? 1 : 0) - (heldKeys['ArrowDown'] ? 1 : 0) ||
+          (useGamepad ? gamepadOut.sticks.pitch : 0) ||
+          touch.pitch,
         roll:
-          (heldKeys['ArrowRight'] ? 1 : 0) -
-          (heldKeys['ArrowLeft'] ? 1 : 0) || touch.roll,
+          (heldKeys['ArrowRight'] ? 1 : 0) - (heldKeys['ArrowLeft'] ? 1 : 0) ||
+          (useGamepad ? gamepadOut.sticks.roll : 0) ||
+          touch.roll,
       };
 
+      const isSpectatingLeader = Boolean(
+        mpConfig?.active && mpConfig.spectatingFollowLeader
+      );
+      const effectiveTrackForPhysics: TrackDef =
+        mpConfig?.active &&
+        (mpConfig.mode === 'laser-tag' || mpConfig.mode === 'drone-tag')
+          ? { ...activeTrack, lapCount: 999 }
+          : activeTrack;
+
       if (mode === 'playing') {
-        if (refsObj.countdownTimer > 0) {
+        wasPlayingMode = true;
+        if (isSpectatingLeader) {
+          fpvAudio.updateFlightSound(false, 0, 0, 0);
+        } else if (refsObj.countdownTimer > 0) {
           refsObj.countdownTimer = Math.max(0, refsObj.countdownTimer - dt);
           const ceilSec = Math.ceil(refsObj.countdownTimer);
           if (ceilSec < refsObj.lastCountdownBeep && ceilSec > 0) {
@@ -517,7 +1024,6 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
             fpvAudio.playCountdownBeep(true);
             finishedSent = false;
           }
-          // Hover gently on start pad during countdown
           phys.motorRpms = [0.22, 0.22, 0.22, 0.22];
           fpvAudio.updateFlightSound(true, 0.16, 0, 0.22);
         } else {
@@ -528,17 +1034,29 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
             activeStats,
             activeRates,
             activeFlightMode,
-            activeTrack,
+            effectiveTrackForPhysics,
             dt,
             refsObj.elapsedRaceMs,
             {
               onGatePassed: (gateId, isLapComplete) => {
                 fpvAudio.playGatePass(isLapComplete);
-                const gObj = activeTrack.gates[phys.currentGateIndex];
-                if (gObj) {
-                  _gateVec.set(gObj.position[0], gObj.position[1], gObj.position[2]);
-                  spawnParticleBurst(_gateVec, 16, 12);
+                const passedGate = activeTrack.gates.find((g) => g.id === gateId);
+                if (passedGate) {
+                  _gateVec.set(
+                    passedGate.position[0],
+                    passedGate.position[1],
+                    passedGate.position[2]
+                  );
+                  spawnParticleBurst(_gateVec, 18, 13);
+                  if (quality !== 'performance') {
+                    shockwaves.spawn(_gateVec, passedGate.headingRad, isLapComplete);
+                  }
                 }
+                mpConfig?.onReportProgress(
+                  phys.currentLap,
+                  phys.currentGateIndex,
+                  phys.cleanGates
+                );
                 propsRef.current.onGatePassed(gateId, isLapComplete);
               },
               onImpact: (severity, impactPos) => {
@@ -548,16 +1066,65 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
               onRaceFinished: () => {
                 if (!finishedSent) {
                   finishedSent = true;
+                  const flightDurationSec = Number(unflushedFlightSec.toFixed(1));
+                  const distanceKm = Number((unflushedDistM / 1000).toFixed(3));
+                  unflushedFlightSec = 0;
+                  unflushedDistM = 0;
+                  unflushedMaxSpeedKmh = 0;
+                  // Push final keyframe
+                  refsObj.recordedGhostFrames.push([
+                    Math.round(refsObj.elapsedRaceMs),
+                    Number(phys.position.x.toFixed(2)),
+                    Number(phys.position.y.toFixed(2)),
+                    Number(phys.position.z.toFixed(2)),
+                    Number(phys.quaternion.x.toFixed(4)),
+                    Number(phys.quaternion.y.toFixed(4)),
+                    Number(phys.quaternion.z.toFixed(4)),
+                    Number(phys.quaternion.w.toFixed(4)),
+                  ]);
                   propsRef.current.onRaceFinished({
                     totalTimeMs: refsObj.elapsedRaceMs,
                     bestLapMs: phys.bestLapMs ?? refsObj.elapsedRaceMs,
                     lapTimesMs: [...phys.lapTimesMs],
                     cleanGates: phys.cleanGates,
+                    maxSpeedKmh: Math.round(phys.maxSpeedKmhReached),
+                    flightDurationSec,
+                    distanceKm,
+                    recordedGhostFrames: [...refsObj.recordedGhostFrames],
                   });
                 }
               },
-            }
+            },
+            fwDamping
           );
+
+          if (!finishedSent) {
+            unflushedFlightSec += dt;
+            const instSpeedMs = phys.velocity.length();
+            unflushedDistM += instSpeedMs * dt;
+            const instSpeedKmh = instSpeedMs * 3.6;
+            if (instSpeedKmh > unflushedMaxSpeedKmh) {
+              unflushedMaxSpeedKmh = instSpeedKmh;
+            }
+          }
+
+          // Record 15Hz Ghost keyframe (cap ~1800 frames)
+          if (
+            refsObj.elapsedRaceMs - refsObj.lastGhostSampleMs >= 66 &&
+            refsObj.recordedGhostFrames.length < 1800
+          ) {
+            refsObj.lastGhostSampleMs = refsObj.elapsedRaceMs;
+            refsObj.recordedGhostFrames.push([
+              Math.round(refsObj.elapsedRaceMs),
+              Number(phys.position.x.toFixed(2)),
+              Number(phys.position.y.toFixed(2)),
+              Number(phys.position.z.toFixed(2)),
+              Number(phys.quaternion.x.toFixed(4)),
+              Number(phys.quaternion.y.toFixed(4)),
+              Number(phys.quaternion.z.toFixed(4)),
+              Number(phys.quaternion.w.toFixed(4)),
+            ]);
+          }
 
           const avgRpm =
             (phys.motorRpms[0] + phys.motorRpms[1] + phys.motorRpms[2] + phys.motorRpms[3]) *
@@ -570,10 +1137,14 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
           );
         }
       } else {
+        if (wasPlayingMode) {
+          wasPlayingMode = false;
+          flushUnflushedFlight();
+        }
         fpvAudio.updateFlightSound(false, 0, 0, 0);
       }
 
-      // Spin propellers visually
+      // Spin propellers & update player drone mesh
       if (refsObj.droneHandle) {
         const dh = refsObj.droneHandle;
         dh.propHubs.forEach((hub, idx) => {
@@ -584,45 +1155,77 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
           dh.materials.blurDisc.opacity = THREE.MathUtils.clamp((rpm - 0.25) * 0.26, 0.04, 0.24);
         });
 
-        // Position drone mesh
         if (mode === 'title' || mode === 'garage') {
           const firstGate = activeTrack.gates[0];
           const h = firstGate ? firstGate.headingRad : 0;
           const sx = firstGate ? firstGate.position[0] - Math.sin(h) * 16 : 0;
           const sz = firstGate ? firstGate.position[2] - Math.cos(h) * 16 : 0;
           const gy = sampleTrackTerrainHeight(sx, sz, activeTrack);
-          const hoverY = gy + 1.35 + Math.sin(totalElapsed * 2.2) * 0.08;
+          const hoverY = gy + 1.35 + Math.sin(totalElapsed * 2.2) * (propsRef.current.benchInspectActive ? 0.025 : 0.08);
           dh.root.position.set(sx, hoverY, sz);
-          dh.root.rotation.set(
-            Math.sin(totalElapsed * 1.3) * 0.04,
-            h + Math.PI + totalElapsed * 0.38,
-            Math.cos(totalElapsed * 1.1) * 0.04
-          );
-          dh.root.visible = true;
 
-          // Contact shadow under hovering showcase drone
+          const orbit = benchOrbitRef.current;
+          const targetExplode =
+            mode === 'garage' && propsRef.current.benchExploded ? 1 : 0;
+          orbit.explodedValue = THREE.MathUtils.lerp(
+            orbit.explodedValue,
+            targetExplode,
+            1 - Math.exp(-8.0 * dt)
+          );
+          dh.setExploded(orbit.explodedValue);
+
+          if (mode === 'garage' && orbit.userInteracted) {
+            dh.root.rotation.set(0, h + Math.PI, 0);
+          } else {
+            dh.root.rotation.set(
+              Math.sin(totalElapsed * 1.3) * 0.04,
+              h + Math.PI + totalElapsed * 0.38,
+              Math.cos(totalElapsed * 1.1) * 0.04
+            );
+          }
+          dh.root.visible = true;
+          aeroTrails.group.visible = false;
+          ghostMesh.root.visible = false;
+
           refsObj.contactShadow.position.set(sx, gy + 0.06, sz);
           refsObj.contactShadow.visible = true;
 
-          // Cinematic orbit camera on Title / Hangar
-          const orbitRadius = mode === 'garage' ? 0.62 : 1.05;
-          const orbitAng = totalElapsed * 0.28 + 0.6;
-          const targetCamX = sx + Math.sin(orbitAng) * orbitRadius;
-          const targetCamZ = sz + Math.cos(orbitAng) * orbitRadius;
-          const targetCamY = hoverY + (mode === 'garage' ? 0.24 : 0.36);
+          const orbitRadius = mode === 'garage' ? orbit.distance : 1.05;
+          const orbitAng =
+            mode === 'garage' && orbit.userInteracted
+              ? orbit.yaw
+              : totalElapsed * 0.28 + 0.6;
+          const pitchLift =
+            mode === 'garage'
+              ? Math.sin(orbit.pitch) * orbitRadius + 0.06
+              : 0.36;
+          const horizRadius =
+            mode === 'garage'
+              ? Math.cos(orbit.pitch * 0.65) * orbitRadius
+              : orbitRadius;
 
-          const damp = 1 - Math.exp(-5.0 * dt);
+          const targetCamX = sx + Math.sin(orbitAng) * horizRadius;
+          const targetCamZ = sz + Math.cos(orbitAng) * horizRadius;
+          const targetCamY = hoverY + pitchLift;
+
+          const damp = 1 - Math.exp(-7.5 * dt);
           camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetCamX, damp);
           camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetCamY, damp);
           camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetCamZ, damp);
-          _lookTarget.set(sx, hoverY + 0.03, sz);
+          // Frame drone higher in viewport when Build Bench dock is open below
+          const lookOffsetY =
+            mode === 'garage' && propsRef.current.benchInspectActive
+              ? -0.055
+              : 0.03;
+          _lookTarget.set(sx, hoverY + lookOffsetY, sz);
           camera.lookAt(_lookTarget);
           if (Math.abs(camera.fov - 52) > 0.2) {
             camera.fov = THREE.MathUtils.lerp(camera.fov, 52, damp);
             camera.updateProjectionMatrix();
           }
         } else {
-          // Playing / Paused / Results / Worldmap backdrop
+          benchOrbitRef.current.explodedValue = 0;
+          dh.setExploded(0);
           dh.root.position.copy(phys.position);
           dh.root.quaternion.copy(phys.quaternion);
 
@@ -638,8 +1241,42 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
           const shakeX = phys.shakeIntensity > 0 ? (Math.random() - 0.5) * 0.14 * phys.shakeIntensity : 0;
           const shakeY = phys.shakeIntensity > 0 ? (Math.random() - 0.5) * 0.14 * phys.shakeIntensity : 0;
 
-          if (activeCamView === 'fpv') {
-            dh.root.visible = false; // Clean unobstructed FPV lens view
+          const spectatePose =
+            isSpectatingLeader && mpConfig?.spectateTargetId
+              ? mpConfig.remotePoses.get(mpConfig.spectateTargetId) ?? null
+              : null;
+
+          if (spectatePose) {
+            dh.root.visible = false;
+            aeroTrails.group.visible = false;
+            _ghostPos.set(spectatePose.x, spectatePose.y, spectatePose.z);
+            _ghostQuat.set(
+              spectatePose.qx,
+              spectatePose.qy,
+              spectatePose.qz,
+              spectatePose.qw
+            );
+            _forward.set(0, 0, -1).applyQuaternion(_ghostQuat).normalize();
+            _camTargetPos
+              .copy(_ghostPos)
+              .addScaledVector(_forward, -2.35)
+              .add(_chaseLift);
+            const camGround = sampleTrackTerrainHeight(
+              _camTargetPos.x,
+              _camTargetPos.z,
+              activeTrack
+            );
+            if (_camTargetPos.y < camGround + 0.65) {
+              _camTargetPos.y = camGround + 0.65;
+            }
+            const chaseDamp = 1 - Math.exp(-10 * dt);
+            smoothedChasePos.lerp(_camTargetPos, chaseDamp);
+            camera.position.copy(smoothedChasePos);
+            _lookTarget.copy(_ghostPos).addScaledVector(_forward, 3.5);
+            camera.lookAt(_lookTarget);
+          } else if (activeCamView === 'fpv') {
+            dh.root.visible = false;
+            aeroTrails.group.visible = false;
             _camOffset.set(0, 0.06, -0.09).applyQuaternion(phys.quaternion);
             camera.position.copy(phys.position).add(_camOffset);
             camera.position.x += shakeX;
@@ -658,11 +1295,21 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
             }
           } else {
             dh.root.visible = true;
+            if (quality !== 'performance') {
+              aeroTrails.group.visible = true;
+              _tipLeft.set(-0.2, 0.03, 0.1).applyQuaternion(phys.quaternion).add(phys.position);
+              _tipRight.set(0.2, 0.03, 0.1).applyQuaternion(phys.quaternion).add(phys.position);
+              const trailPower = THREE.MathUtils.clamp((speed - 8) / 30, 0, 1);
+              aeroTrails.pushTipPositions(_tipLeft, _tipRight, trailPower);
+            } else {
+              aeroTrails.group.visible = false;
+            }
+
             _forward.set(0, 0, -1).applyQuaternion(phys.quaternion).normalize();
             _camTargetPos
               .copy(phys.position)
               .addScaledVector(_forward, -1.65)
-              .add(new THREE.Vector3(0, 0.58, 0));
+              .add(_chaseLift);
 
             const camGround = sampleTrackTerrainHeight(_camTargetPos.x, _camTargetPos.z, activeTrack);
             if (_camTargetPos.y < camGround + 0.45) {
@@ -684,13 +1331,53 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
               camera.updateProjectionMatrix();
             }
           }
+
+          // Update 3D Holographic Ghost Rival pose
+          if (
+            mode === 'playing' &&
+            ghostRec &&
+            ghostRec.frames.length > 1 &&
+            refsObj.countdownTimer <= 0
+          ) {
+            const hasPose = sampleGhostPoseAtTimeInto(
+              ghostRec.frames,
+              refsObj.elapsedRaceMs,
+              _ghostPos,
+              _ghostQuat
+            );
+            ghostMesh.root.visible = hasPose;
+            if (hasPose) {
+              ghostMesh.root.position.copy(_ghostPos);
+              ghostMesh.root.quaternion.copy(_ghostQuat);
+            }
+          } else {
+            ghostMesh.root.visible = false;
+          }
         }
       }
 
-      // Update active gate beacon & highlight
-      if (refsObj.trackHandle) {
-        refsObj.trackHandle.updateActiveGate(phys.currentGateIndex, totalElapsed);
-      }
+      // Update multiplayer remote drones & laser beams
+      mpVisuals.update(
+        dt,
+        totalElapsed,
+        Boolean(mode === 'playing' && mpConfig?.active),
+        mpConfig?.remotePoses ?? new Map(),
+        mpConfig?.pendingLaserBeams ?? [],
+        (sparkPos) => spawnParticleBurst(sparkPos, 20, 14)
+      );
+
+      // Update atmospheric sky dome, reflective water, shockwaves, and velocity speed lines
+      skyHandle.update(totalElapsed, activeTrack.biome, quality !== 'performance');
+      refsObj.trackHandle?.updateActiveGate(phys.currentGateIndex, totalElapsed);
+      refsObj.trackHandle?.updateEffects(totalElapsed, camera.position);
+      shockwaves.update(dt);
+      speedLines.update(
+        camera.position,
+        camera.quaternion,
+        phys.velocity.length() * 3.6,
+        dt,
+        mode === 'playing' && quality !== 'performance' && refsObj.countdownTimer <= 0 && !isSpectatingLeader
+      );
 
       // Update pooled particles
       for (let i = 0; i < particles.length; i++) {
@@ -714,19 +1401,69 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
       }
       particleMesh.instanceMatrix.needsUpdate = true;
 
-      // Push throttled telemetry snapshot (~20Hz) to HUD
+      // Push throttled telemetry snapshot (~20Hz) to HUD & publish multiplayer pose
       if (mode === 'playing' && totalElapsed - lastTelemetryPush >= 0.05) {
         lastTelemetryPush = totalElapsed;
+        if (mpConfig?.active && !isSpectatingLeader) {
+          mpConfig.onPublishPose({
+            x: Number(phys.position.x.toFixed(2)),
+            y: Number(phys.position.y.toFixed(2)),
+            z: Number(phys.position.z.toFixed(2)),
+            qx: Number(phys.quaternion.x.toFixed(4)),
+            qy: Number(phys.quaternion.y.toFixed(4)),
+            qz: Number(phys.quaternion.z.toFixed(4)),
+            qw: Number(phys.quaternion.w.toFixed(4)),
+            vx: Number(phys.velocity.x.toFixed(2)),
+            vy: Number(phys.velocity.y.toFixed(2)),
+            vz: Number(phys.velocity.z.toFixed(2)),
+            lap: phys.currentLap,
+            gateIndex: phys.currentGateIndex,
+          });
+        }
         const g = activeTrack.gates[phys.currentGateIndex];
         let gateArrowAngle = 0;
         let gateDist = 0;
+        let gateElevationDiff = 0;
         if (g) {
           _gateVec.set(g.position[0], g.position[1], g.position[2]);
           gateDist = phys.position.distanceTo(_gateVec);
+          gateElevationDiff = Number((g.position[1] - phys.position.y).toFixed(1));
           _invQuat.copy(phys.quaternion).invert();
           _localGate.copy(_gateVec).sub(phys.position).applyQuaternion(_invQuat);
           gateArrowAngle = Math.atan2(_localGate.x, -_localGate.z);
         }
+
+        // Compute Ghost pace delta & Euclidean distance
+        let ghostDeltaMs: number | null = null;
+        let ghostDistM: number | null = null;
+        if (ghostRec && ghostRec.frames.length > 1 && activeTrack.gates.length > 0) {
+          ghostDistM = Math.round(phys.position.distanceTo(_ghostPos));
+          const totalRaceGates = activeTrack.gates.length * activeTrack.lapCount;
+          const gatesCleared =
+            (phys.currentLap - 1) * activeTrack.gates.length + phys.currentGateIndex;
+
+          const prevGateIdx =
+            phys.currentGateIndex === 0 && phys.currentLap === 1
+              ? 0
+              : (phys.currentGateIndex - 1 + activeTrack.gates.length) % activeTrack.gates.length;
+          const prevG = activeTrack.gates[prevGateIdx];
+          let legFrac = 0;
+          if (g && prevG) {
+            _prevGateVec.set(prevG.position[0], prevG.position[1], prevG.position[2]);
+            const legLen = Math.max(12, _gateVec.distanceTo(_prevGateVec));
+            legFrac = THREE.MathUtils.clamp(1 - gateDist / legLen, 0, 0.95);
+          }
+          const progress = THREE.MathUtils.clamp(
+            (gatesCleared + legFrac) / Math.max(1, totalRaceGates),
+            0,
+            1
+          );
+          const expectedGhostTimeMs = progress * ghostRec.totalTimeMs;
+          if (refsObj.elapsedRaceMs > 800) {
+            ghostDeltaMs = Math.round(refsObj.elapsedRaceMs - expectedGhostTimeMs);
+          }
+        }
+
         _euler.setFromQuaternion(phys.quaternion, 'YXZ');
         const groundAtDrone = sampleTrackTerrainHeight(
           phys.position.x,
@@ -758,6 +1495,10 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
           lastSplitDeltaMs: phys.lastSplitDeltaMs,
           gateArrowAngleRad: gateArrowAngle,
           gateDistM: Math.round(gateDist),
+          gateElevationDiffM: gateElevationDiff,
+          ghostDeltaMs,
+          ghostDistM,
+          ghostLabel: ghostRec ? ghostRec.label : null,
           motorRpms: phys.motorRpms,
           armed: phys.armed,
           crashed: phys.crashCooldown > 0,
@@ -765,7 +1506,11 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
         });
       }
 
-      renderer.render(scene, camera);
+      if (isSoftwareGl || quality === 'performance' || !composer) {
+        renderer.render(scene, camera);
+      } else {
+        composer.render();
+      }
 
       if (isSoftwareGl) {
         afterDraw(tick);
@@ -782,22 +1527,38 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
 
     return () => {
       disposed = true;
+      flushUnflushedFlight();
       cancelAnimationFrame(frameIdRef);
       clearTimeout(frameIdRef);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleResize);
+      window.visualViewport?.removeEventListener('resize', handleResize);
+      resizeObserver?.disconnect();
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost);
+      renderer.domElement.removeEventListener('contextmenu', onCanvasContextMenu);
+      renderer.domElement.removeEventListener('pointerdown', onCanvasPointerDown);
+      renderer.domElement.removeEventListener('wheel', onCanvasWheel);
+      window.removeEventListener('pointermove', onWindowPointerMove);
+      window.removeEventListener('pointerup', onWindowPointerUp);
 
       refsObj.droneHandle?.dispose();
       refsObj.trackHandle?.dispose();
+      skyHandle.dispose();
+      aeroTrails.dispose();
+      shockwaves.dispose();
+      speedLines.dispose();
+      ghostMesh.dispose();
+      mpVisuals.dispose();
       shadowGeo.dispose();
       shadowMat.dispose();
       shadowTex.dispose();
       partGeo.dispose();
       partMat.dispose();
       envTex.dispose();
+      composer?.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === container) {
         container.removeChild(renderer.domElement);
@@ -808,7 +1569,7 @@ export const FpvViewport: React.FC<FpvViewportProps> = ({
   return (
     <div
       ref={mountRef}
-      className="fixed inset-0 w-screen h-screen overflow-hidden bg-zinc-950"
+      className="fixed inset-0 w-screen h-dvh overflow-hidden bg-zinc-950"
     />
   );
 };

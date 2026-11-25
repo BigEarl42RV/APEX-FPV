@@ -5,19 +5,77 @@
     --font-display: 'Chakra Petch', sans-serif;
     --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --overscan-pad: 0px;
+    --fold-gap-x: 0px;
+    --fold-gap-y: 0px;
   }
 
   html, body, #root {
     width: 100%;
     height: 100%;
+    height: 100dvh;
+    min-height: 100dvh;
     margin: 0;
     padding: 0;
     overflow: hidden;
     font-family: var(--font-sans);
     background-color: #09090b;
     color: #f4f4f5;
-    touch-action: none;
+    touch-action: manipulation;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
   }
+}
+
+/* Console / Living-room TV overscan safe buffer */
+html[data-console-browser="true"] {
+  --overscan-pad: 2.2vmin;
+}
+
+/* Foldable Dual-Screen Viewport Segment Variables */
+@media (horizontal-viewport-segments: 2) {
+  :root {
+    --fold-left-width: env(viewport-segment-width 0 0);
+    --fold-right-width: env(viewport-segment-width 1 0);
+    --fold-gap-x: calc(env(viewport-segment-left 1 0) - env(viewport-segment-right 0 0));
+  }
+
+  .fold-split-h {
+    display: grid !important;
+    grid-template-columns: var(--fold-left-width) var(--fold-right-width) !important;
+    column-gap: max(16px, var(--fold-gap-x)) !important;
+  }
+
+  .fold-split-h > .fold-pane-left {
+    grid-column: 1 !important;
+  }
+
+  .fold-split-h > .fold-pane-right {
+    grid-column: 2 !important;
+  }
+}
+
+@media (vertical-viewport-segments: 2) {
+  :root {
+    --fold-top-height: env(viewport-segment-height 0 0);
+    --fold-bottom-height: env(viewport-segment-height 0 1);
+    --fold-gap-y: calc(env(viewport-segment-top 0 1) - env(viewport-segment-bottom 0 0));
+  }
+
+  .fold-tabletop-dock {
+    max-height: calc(var(--fold-bottom-height) - var(--safe-bottom) - 12px) !important;
+  }
+}
+
+.safe-inset-container {
+  padding-top: calc(var(--safe-top) + var(--overscan-pad));
+  padding-right: calc(var(--safe-right) + var(--overscan-pad));
+  padding-bottom: calc(var(--safe-bottom) + var(--overscan-pad));
+  padding-left: calc(var(--safe-left) + var(--overscan-pad));
 }
 
 .font-display {
@@ -27,6 +85,13 @@
 .font-mono-tabular {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* High-contrast Console D-Pad / Stick Spatial Focus Indicator */
+[data-gp-focus="true"] {
+  outline: 2px solid #f59e0b !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.24), 0 8px 20px rgba(0, 0, 0, 0.45) !important;
 }
 
 /* Custom sleek range inputs for RC tuning & rates */
@@ -42,8 +107,8 @@ input[type='range'].fpv-slider {
 input[type='range'].fpv-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border-radius: 4px;
   background: #f59e0b;
   cursor: pointer;
@@ -51,10 +116,26 @@ input[type='range'].fpv-slider::-webkit-slider-thumb {
 }
 
 input[type='range'].fpv-slider::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border-radius: 4px;
   background: #f59e0b;
   cursor: pointer;
   border: 2px solid #09090b;
+}
+
+@media (pointer: coarse) {
+  input[type='range'].fpv-slider {
+    height: 8px;
+  }
+  input[type='range'].fpv-slider::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
+  input[type='range'].fpv-slider::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
 }

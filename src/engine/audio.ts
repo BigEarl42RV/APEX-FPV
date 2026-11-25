@@ -1,3 +1,4 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 /**
  * Procedural Web Audio API synthesizer for realistic FPV brushless motor hum,
  * prop wash turbulence, wind rush, gate split chimes, and impact transients.
@@ -186,6 +187,75 @@ class FpvAudioEngine {
     gain.connect(this.masterGain);
     osc.start(t);
     osc.stop(t + 0.22);
+  }
+
+  public playLaserPulse(): void {
+    if (!this.initialized || !this.ctx || !this.masterGain || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(1240, t);
+    osc.frequency.exponentialRampToValueAtTime(240, t + 0.13);
+    gain.gain.setValueAtTime(0.22, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + 0.15);
+  }
+
+  public playHitConfirm(eliminated: boolean): void {
+    if (!this.initialized || !this.ctx || !this.masterGain || this.muted) return;
+    const t = this.ctx.currentTime;
+    const freqs = eliminated ? [880, 1174.66, 1567.98] : [920, 1240];
+    freqs.forEach((f, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(f, t + idx * 0.045);
+      gain.gain.setValueAtTime(0.22, t + idx * 0.045);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.045 + 0.16);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(t + idx * 0.045);
+      osc.stop(t + idx * 0.045 + 0.18);
+    });
+  }
+
+  public playShieldHit(): void {
+    if (!this.initialized || !this.ctx || !this.masterGain || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(340, t);
+    osc.frequency.exponentialRampToValueAtTime(95, t + 0.22);
+    gain.gain.setValueAtTime(0.26, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + 0.25);
+  }
+
+  public playTagTransfer(): void {
+    if (!this.initialized || !this.ctx || !this.masterGain || this.muted) return;
+    const t = this.ctx.currentTime;
+    [523.25, 659.25, 1046.5].forEach((f, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, t + idx * 0.05);
+      gain.gain.setValueAtTime(0.2, t + idx * 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.05 + 0.18);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(t + idx * 0.05);
+      osc.stop(t + idx * 0.05 + 0.2);
+    });
   }
 }
 

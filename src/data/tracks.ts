@@ -1,3 +1,4 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 import type { GateDef, TrackBiome, TrackDef, TrackObstacle } from '../types/game';
 
 /**
@@ -205,6 +206,27 @@ const DESERT_GATES = createLoopGates(
   DESERT_STUB
 );
 
+const COASTAL_STUB = {
+  terrainSeed: 6814,
+  terrainScale: 0.0115,
+  terrainRelief: 5.4,
+};
+const COASTAL_GATES = createLoopGates(
+  [
+    { x: 0, z: 30, altOffset: 5.2, type: 'arch' },
+    { x: 56, z: 84, altOffset: 8.5, type: 'split' },
+    { x: 128, z: 74, altOffset: 14.5, type: 'ring' },
+    { x: 148, z: 0, altOffset: 19.5, type: 'dive' },
+    { x: 110, z: -78, altOffset: 8.0, type: 'arch' },
+    { x: 34, z: -114, altOffset: 11.5, type: 'ring' },
+    { x: -52, z: -98, altOffset: 16.0, type: 'dive' },
+    { x: -116, z: -36, altOffset: 8.5, type: 'split' },
+    { x: -104, z: 38, altOffset: 7.0, type: 'ring' },
+    { x: -48, z: 54, altOffset: 5.5, type: 'arch' },
+  ],
+  COASTAL_STUB
+);
+
 export const BUILTIN_TRACKS: TrackDef[] = [
   {
     id: 'alpine-ridge',
@@ -241,6 +263,18 @@ export const BUILTIN_TRACKS: TrackDef[] = [
     gates: DESERT_GATES,
     obstacles: generateTrackObstacles(4077, DESERT_GATES, 'desert', 48),
     ...DESERT_STUB,
+  },
+  {
+    id: 'coastal-harbor',
+    name: 'Coastal Harbor GP',
+    locationLabel: 'Pacific Breakwater Arena',
+    biome: 'coastal',
+    source: 'builtin',
+    lapCount: 3,
+    parTimeSec: 64,
+    gates: COASTAL_GATES,
+    obstacles: generateTrackObstacles(6814, COASTAL_GATES, 'coastal', 44),
+    ...COASTAL_STUB,
   },
 ];
 

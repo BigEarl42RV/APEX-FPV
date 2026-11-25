@@ -1,3 +1,4 @@
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
 import * as THREE from 'three';
 import type {
   ComputedDroneStats,
@@ -31,6 +32,7 @@ export interface DronePhysicsState {
   bestLapMs: number | null;
   lastSplitDeltaMs: number | null;
   cleanGates: number;
+  maxSpeedKmhReached: number;
   finished: boolean;
 }
 
@@ -124,6 +126,7 @@ export function createInitialPhysicsState(
     bestLapMs: null,
     lastSplitDeltaMs: null,
     cleanGates: 0,
+    maxSpeedKmhReached: 0,
     finished: false,
   };
 }
@@ -143,7 +146,8 @@ export function stepDronePhysics(
   track: TrackDef,
   dt: number,
   elapsedRaceMs: number,
-  callbacks?: StepPhysicsCallbacks
+  callbacks?: StepPhysicsCallbacks,
+  propwashDamping = 0
 ): void {
   if (state.hitstopTimer > 0) {
     state.hitstopTimer = Math.max(0, state.hitstopTimer - dt);
@@ -217,8 +221,8 @@ export function stepDronePhysics(
     targetYawRate = computeBetaflightRateRadS(-inputs.yaw, rates, activeAuthority * 0.85);
   }
 
-  // First-order PID gyro tracking with physical motor responsiveness
-  const gyroResponse = 1 - Math.exp(-16.5 * stats.pidResponsiveness * dt);
+  // First-order PID gyro tracking with physical motor responsiveness & FC firmware filter
+  const gyroResponse = 1 - Math.exp(-(16.5 + propwashDamping * 9.0) * stats.pidResponsiveness * dt);
   state.angularVelocity.x = THREE.MathUtils.lerp(state.angularVelocity.x, targetPitchRate, gyroResponse);
   state.angularVelocity.y = THREE.MathUtils.lerp(state.angularVelocity.y, targetYawRate, gyroResponse);
   state.angularVelocity.z = THREE.MathUtils.lerp(state.angularVelocity.z, targetRollRate, gyroResponse);
@@ -240,11 +244,17 @@ export function stepDronePhysics(
   const agl = Math.max(0, state.position.y - groundY);
   const groundEffect = agl < 1.6 ? 1 + (1 - agl / 1.6) * 0.16 : 1.0;
 
-  const thrustN = stats.maxThrustN * throttleCurve * voltageMult * groundEffect;
+  // Propwash corner lift efficiency bonus from higher firmware RPM filtering
+  const firmwarePropAuthority = 1 + propwashDamping * 0.04;
+  const thrustN = stats.maxThrustN * throttleCurve * voltageMult * groundEffect * firmwarePropAuthority;
   _thrustVec.copy(_localUp).multiplyScalar(thrustN);
 
   // Aerodynamic drag: linear parasitic + quadratic velocity^2 drag
   const speed = state.velocity.length();
+  const speedKmh = speed * 3.6;
+  if (speedKmh > state.maxSpeedKmhReached) {
+    state.maxSpeedKmhReached = speedKmh;
+  }
   const dragMag = speed * 0.18 + speed * speed * stats.dragCoeff * 0.11;
   if (speed > 0.001) {
     _dragVec.copy(state.velocity).divideScalar(speed).multiplyScalar(-dragMag);

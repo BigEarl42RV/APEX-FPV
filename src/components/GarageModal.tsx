@@ -1,16 +1,50 @@
-import React, { useState } from 'react';
-import { ArrowLeft, Check, Lock, Play, Sliders, Sparkles, Wrench, Zap } from 'lucide-react';
+/* © 2026 SampsonSystem's LLC. All Rights Reserved. Proprietary & Confidential Software. */
+import React, { useEffect, useState } from 'react';
+import {
+  ArrowLeft,
+  Award,
+  Check,
+  Cpu,
+  Eye,
+  Gamepad2,
+  Hammer,
+  Lock,
+  Play,
+  Radar,
+  Sliders,
+  Sparkles,
+  Wrench,
+  Zap,
+} from 'lucide-react';
 import {
   COLOR_SWATCHES,
   DRONE_FRAMES,
   UPGRADE_CATALOG,
-  computeDroneStats,
-  getFrameSpec,
 } from '../data/drones';
+import {
+  FIRMWARE_CATALOG,
+  GOGGLE_FEED_CATALOG,
+  HUD_MODULES_CATALOG,
+  normalizeSoftwareLoadout,
+} from '../data/progression';
+import { normalizeGamepadConfig } from '../engine/gamepad';
+import {
+  evaluateCustomDroneBuild,
+} from '../data/droneBuilder';
+import { GamepadCalibrationPanel } from './GamepadCalibrationPanel';
+import { BuildBenchPanel } from './BuildBenchPanel';
 import type {
+  ComputedDroneStats,
+  CustomDroneBuild,
+  CustomDronePartsSelection,
   DroneCustomization,
   DroneFrameId,
+  FirmwareLevel,
   FlightMode,
+  GamepadConfig,
+  GoggleFeedMode,
+  GraphicsQuality,
+  HudModuleId,
   PlayerGarageState,
   RatesProfile,
   StickMode,
@@ -19,6 +53,15 @@ import type {
 
 interface GarageModalProps {
   garage: PlayerGarageState;
+  activeRigName: string;
+  activeRigClass: string;
+  activeRigStats: ComputedDroneStats;
+  activeRigCustom: DroneCustomization;
+  benchDraftParts: CustomDronePartsSelection;
+  benchDraftCustom: DroneCustomization;
+  benchDraftName: string;
+  benchEditingSlotId: string | null;
+  benchExploded: boolean;
   onSelectFrame: (id: DroneFrameId) => void;
   onUnlockFrame: (id: DroneFrameId, cost: number) => void;
   onUpgradePart: (cat: UpgradeCategory, cost: number) => void;
@@ -26,14 +69,53 @@ interface GarageModalProps {
   onUpdateRates: (patch: Partial<RatesProfile>) => void;
   onChangeFlightMode: (mode: FlightMode) => void;
   onChangeStickMode: (mode: StickMode) => void;
+  onUpdateGamepad: (config: GamepadConfig) => void;
+  onOpenGamepadConfig: () => void;
+  onChangeGraphicsQuality: (q: GraphicsQuality) => void;
+  onUnlockFirmware: (level: FirmwareLevel, cost: number) => void;
+  onSelectFirmware: (level: FirmwareLevel) => void;
+  onUnlockHudModule: (id: HudModuleId, cost: number) => void;
+  onToggleHudModule: (id: HudModuleId) => void;
+  onUnlockGoggleMode: (mode: GoggleFeedMode, cost: number) => void;
+  onSelectGoggleMode: (mode: GoggleFeedMode) => void;
+  onToggleAnalogFx: () => void;
+  onChangeBenchTabActive: (active: boolean) => void;
+  onChangeBenchDraftParts: (next: CustomDronePartsSelection) => void;
+  onChangeBenchDraftCustom: (patch: Partial<DroneCustomization>) => void;
+  onChangeBenchDraftName: (name: string) => void;
+  onSelectBenchSlotToEdit: (build: CustomDroneBuild) => void;
+  onStartNewBenchDraft: () => void;
+  onEquipCustomBuild: (buildId: string) => void;
+  onDuplicateCustomBuild: (buildId: string) => void;
+  onDeleteCustomBuild: (buildId: string) => void;
+  onSaveAndEquipCustomBuild: () => void;
+  onToggleBenchExploded: () => void;
+  onResetBenchCamera: () => void;
+  onOpenCareer: () => void;
   onClose: () => void;
   onLaunchFlight: () => void;
 }
 
-type GarageTab = 'frames' | 'upgrades' | 'livery' | 'rates';
+type GarageTab =
+  | 'build'
+  | 'frames'
+  | 'upgrades'
+  | 'software'
+  | 'livery'
+  | 'rates'
+  | 'controller';
 
 export const GarageModal: React.FC<GarageModalProps> = ({
   garage,
+  activeRigName,
+  activeRigClass,
+  activeRigStats,
+  activeRigCustom,
+  benchDraftParts,
+  benchDraftCustom,
+  benchDraftName,
+  benchEditingSlotId,
+  benchExploded,
   onSelectFrame,
   onUnlockFrame,
   onUpgradePart,
@@ -41,24 +123,69 @@ export const GarageModal: React.FC<GarageModalProps> = ({
   onUpdateRates,
   onChangeFlightMode,
   onChangeStickMode,
+  onUpdateGamepad,
+  onOpenGamepadConfig,
+  onChangeGraphicsQuality,
+  onUnlockFirmware,
+  onSelectFirmware,
+  onUnlockHudModule,
+  onToggleHudModule,
+  onUnlockGoggleMode,
+  onSelectGoggleMode,
+  onToggleAnalogFx,
+  onChangeBenchTabActive,
+  onChangeBenchDraftParts,
+  onChangeBenchDraftCustom,
+  onChangeBenchDraftName,
+  onSelectBenchSlotToEdit,
+  onStartNewBenchDraft,
+  onEquipCustomBuild,
+  onDuplicateCustomBuild,
+  onDeleteCustomBuild,
+  onSaveAndEquipCustomBuild,
+  onToggleBenchExploded,
+  onResetBenchCamera,
+  onOpenCareer,
   onClose,
   onLaunchFlight,
 }) => {
-  const [tab, setTab] = useState<GarageTab>('upgrades');
+  const [tab, setTab] = useState<GarageTab>('build');
+  const gamepadConfig = normalizeGamepadConfig(garage.gamepad);
+  const software = normalizeSoftwareLoadout(garage.software);
+  const graphicsQuality: GraphicsQuality = garage.graphicsQuality ?? 'ultra';
 
-  const activeFrame = getFrameSpec(garage.selectedFrame);
   const activeUpgrades = garage.upgradesByFrame[garage.selectedFrame];
-  const activeCustom = garage.customizationByFrame[garage.selectedFrame];
-  const stats = computeDroneStats(
-    garage.selectedFrame,
-    activeUpgrades,
-    garage.rates
-  );
+  const isCustomActive = Boolean(garage.activeCustomBuildId);
+
+  useEffect(() => {
+    onChangeBenchTabActive(tab === 'build');
+    return () => onChangeBenchTabActive(false);
+  }, [tab, onChangeBenchTabActive]);
+
+  const switchTab = (next: GarageTab) => {
+    setTab(next);
+  };
+
+  const benchPreviewEval =
+    tab === 'build'
+      ? evaluateCustomDroneBuild(
+          benchDraftParts,
+          garage.rates,
+          software.firmwareLevel,
+          garage.unlockedPartIds ?? []
+        )
+      : null;
+
+  const stats = benchPreviewEval ? benchPreviewEval.stats : activeRigStats;
+  const activeCustom = activeRigCustom;
 
   return (
-    <div className="fixed inset-0 z-30 pointer-events-none flex flex-col justify-between p-4 sm:p-6">
-      {/* Top Bar: Back + Drone Specs Readout + Launch */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div
+      data-gp-scope="true"
+      className="fixed inset-0 z-30 pointer-events-none flex flex-col justify-between p-3 sm:p-6 safe-inset-container"
+    >
+      {/* Top Bar: Back + Rig Readout + Quality Selector + Launch */}
+      <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
         <div className="pointer-events-auto flex items-center gap-3 bg-zinc-950/92 border border-zinc-800 rounded-lg px-3 py-2">
           <button
             type="button"
@@ -71,15 +198,19 @@ export const GarageModal: React.FC<GarageModalProps> = ({
           <div className="h-4 w-px bg-zinc-800" />
           <div>
             <div className="text-sm font-display font-bold text-white">
-              {activeFrame.name}
+              {tab === 'build' ? benchDraftName.trim() || 'Custom Build Draft' : activeRigName}
             </div>
             <div className="text-[11px] text-zinc-400">
-              {activeFrame.classLabel}
+              {tab === 'build'
+                ? 'Build Bench Live 3D Preview'
+                : isCustomActive
+                  ? `Custom Build · ${activeRigClass}`
+                  : activeRigClass}
             </div>
           </div>
         </div>
 
-        {/* Live Physics Stat Strip */}
+        {/* Live Physics Stat Strip + Graphics Preset Selector */}
         <div className="pointer-events-auto flex flex-wrap items-center gap-4 bg-zinc-950/92 border border-zinc-800 rounded-lg px-4 py-2">
           <div>
             <div className="text-[10px] text-zinc-400">TWR</div>
@@ -94,9 +225,9 @@ export const GarageModal: React.FC<GarageModalProps> = ({
             </div>
           </div>
           <div>
-            <div className="text-[10px] text-zinc-400">Mass</div>
-            <div className="text-sm font-mono-tabular font-bold text-zinc-100">
-              {Math.round(stats.massKg * 1000)}g
+            <div className="text-[10px] text-zinc-400">PID Lock</div>
+            <div className="text-sm font-mono-tabular font-bold text-emerald-400">
+              {stats.pidResponsiveness.toFixed(2)}x
             </div>
           </div>
           <div>
@@ -105,6 +236,23 @@ export const GarageModal: React.FC<GarageModalProps> = ({
               {stats.maxRateDegS}°/s
             </div>
           </div>
+          <div className="h-6 w-px bg-zinc-800 hidden md:block" />
+          <div className="hidden md:flex items-center gap-1 bg-zinc-900 p-1 rounded-md border border-zinc-800">
+            {(['ultra', 'high', 'performance'] as GraphicsQuality[]).map((q) => (
+              <button
+                key={q}
+                type="button"
+                onClick={() => onChangeGraphicsQuality(q)}
+                className={`px-2 py-0.5 text-[11px] font-semibold rounded transition-colors cursor-pointer capitalize ${
+                  graphicsQuality === q
+                    ? 'bg-cyan-500 text-zinc-950'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                {q === 'performance' ? 'Perf' : q}
+              </button>
+            ))}
+          </div>
           <div className="h-6 w-px bg-zinc-800" />
           <div>
             <div className="text-[10px] text-zinc-400">Credits</div>
@@ -112,6 +260,14 @@ export const GarageModal: React.FC<GarageModalProps> = ({
               {garage.credits.toLocaleString()} CR
             </div>
           </div>
+          <button
+            type="button"
+            onClick={onOpenCareer}
+            className="flex items-center gap-1.5 px-3 py-2 min-h-[40px] sm:min-h-0 bg-zinc-900 hover:bg-zinc-800 border border-cyan-500/50 text-cyan-300 text-xs font-display font-bold rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Award className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Pilot Career</span>
+          </button>
           <button
             type="button"
             onClick={onLaunchFlight}
@@ -123,14 +279,30 @@ export const GarageModal: React.FC<GarageModalProps> = ({
         </div>
       </div>
 
-      {/* Bottom Workshop Dock (Leaves center 3D drone 100% visible above) */}
-      <div className="pointer-events-auto w-full max-w-5xl mx-auto bg-zinc-950/92 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl">
+      {/* Bottom Workshop Dock (Leaves center 3D drone visible above) */}
+      <div className="pointer-events-auto w-full max-w-5xl mx-auto bg-zinc-950/92 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl fold-tabletop-dock">
         {/* Segmented Tab Strip */}
         <div className="flex items-center gap-1 p-1.5 bg-zinc-900/90 border-b border-zinc-800 overflow-x-auto">
           <button
             type="button"
-            onClick={() => setTab('frames')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'build')}
+            onClick={() => switchTab('build')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
+              tab === 'build'
+                ? 'bg-amber-500 text-zinc-950'
+                : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
+            }`}
+          >
+            <Hammer className="w-3.5 h-3.5" />
+            <span>Build Bench</span>
+          </button>
+          <button
+            type="button"
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'frames')}
+            onClick={() => switchTab('frames')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
               tab === 'frames'
                 ? 'bg-amber-500 text-zinc-950'
                 : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
@@ -141,49 +313,111 @@ export const GarageModal: React.FC<GarageModalProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setTab('upgrades')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'upgrades')}
+            onClick={() => switchTab('upgrades')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
               tab === 'upgrades'
                 ? 'bg-amber-500 text-zinc-950'
                 : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
             }`}
           >
             <Wrench className="w-3.5 h-3.5" />
-            <span>Component Upgrades</span>
+            <span>Hardware Parts</span>
           </button>
           <button
             type="button"
-            onClick={() => setTab('livery')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'software')}
+            onClick={() => switchTab('software')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
+              tab === 'software'
+                ? 'bg-cyan-500 text-zinc-950'
+                : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
+            }`}
+          >
+            <Cpu className="w-3.5 h-3.5" />
+            <span>Avionics &amp; Software</span>
+          </button>
+          <button
+            type="button"
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'livery')}
+            onClick={() => switchTab('livery')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
               tab === 'livery'
                 ? 'bg-amber-500 text-zinc-950'
                 : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Livery & Optics</span>
+            <span>Livery &amp; Optics</span>
           </button>
           <button
             type="button"
-            onClick={() => setTab('rates')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'rates')}
+            onClick={() => switchTab('rates')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
               tab === 'rates'
                 ? 'bg-amber-500 text-zinc-950'
                 : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Rates & Radio</span>
+            <span>Rates &amp; Radio</span>
+          </button>
+          <button
+            type="button"
+            data-gp-tab="true"
+            data-gp-tab-active={String(tab === 'controller')}
+            onClick={() => switchTab('controller')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px] sm:min-h-0 ${
+              tab === 'controller'
+                ? 'bg-amber-500 text-zinc-950'
+                : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
+            }`}
+          >
+            <Gamepad2 className="w-3.5 h-3.5" />
+            <span>Controller &amp; USB</span>
           </button>
         </div>
 
         {/* Tab Body */}
-        <div className="p-4 max-h-[40vh] overflow-y-auto">
+        <div className="p-3 sm:p-4 max-h-[50dvh] sm:max-h-[45dvh] overflow-y-auto">
+          {tab === 'build' && (
+            <BuildBenchPanel
+              credits={garage.credits}
+              unlockedPartIds={garage.unlockedPartIds ?? []}
+              customBuilds={garage.customBuilds ?? []}
+              activeCustomBuildId={garage.activeCustomBuildId ?? null}
+              draftParts={benchDraftParts}
+              draftCustom={benchDraftCustom}
+              draftName={benchDraftName}
+              editingSlotId={benchEditingSlotId}
+              benchExploded={benchExploded}
+              currentActiveStats={activeRigStats}
+              rates={garage.rates}
+              firmwareLevel={software.firmwareLevel}
+              onChangeDraftParts={onChangeBenchDraftParts}
+              onChangeDraftCustom={onChangeBenchDraftCustom}
+              onChangeDraftName={onChangeBenchDraftName}
+              onSelectSlotToEdit={onSelectBenchSlotToEdit}
+              onStartNewDraft={onStartNewBenchDraft}
+              onEquipSlot={onEquipCustomBuild}
+              onDuplicateSlot={onDuplicateCustomBuild}
+              onDeleteSlot={onDeleteCustomBuild}
+              onSaveAndEquipBuild={onSaveAndEquipCustomBuild}
+              onToggleExploded={onToggleBenchExploded}
+              onResetBenchCamera={onResetBenchCamera}
+            />
+          )}
+
           {tab === 'frames' && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               {DRONE_FRAMES.map((f) => {
                 const unlocked = garage.unlockedFrames.includes(f.id);
-                const selected = garage.selectedFrame === f.id;
+                const selected = !isCustomActive && garage.selectedFrame === f.id;
                 const canAfford = garage.credits >= f.unlockCost;
                 return (
                   <div
@@ -280,7 +514,6 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                         {curSpec.detail}
                       </div>
 
-                      {/* Level indicator bars */}
                       <div className="grid grid-cols-5 gap-1 mt-3">
                         {[0, 1, 2, 3, 4].map((lvl) => (
                           <div
@@ -316,6 +549,220 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {tab === 'software' && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              {/* Column 1: Flight Controller Firmware */}
+              <div className="p-3.5 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                    <Cpu className="w-3.5 h-3.5" />
+                    <span>FC Gyro Firmware</span>
+                  </div>
+                  <span className="text-[11px] font-mono-tabular text-zinc-400">
+                    Active: {FIRMWARE_CATALOG[software.firmwareLevel].tag}
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  {FIRMWARE_CATALOG.map((fw) => {
+                    const unlocked = software.unlockedFirmwareLevel >= fw.level;
+                    const active = software.firmwareLevel === fw.level;
+                    const canBuy =
+                      fw.level === software.unlockedFirmwareLevel + 1 &&
+                      garage.credits >= fw.cost;
+
+                    return (
+                      <div
+                        key={fw.level}
+                        className={`p-2.5 rounded-md border flex items-center justify-between gap-2 ${
+                          active
+                            ? 'bg-zinc-950 border-amber-500'
+                            : 'bg-zinc-950/60 border-zinc-800'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-display font-bold text-white">
+                            {fw.name}
+                          </div>
+                          <div className="text-[11px] text-zinc-400 leading-snug mt-0.5">
+                            {fw.detail}
+                          </div>
+                        </div>
+                        {unlocked ? (
+                          <button
+                            type="button"
+                            onClick={() => onSelectFirmware(fw.level)}
+                            disabled={active}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded shrink-0 cursor-pointer ${
+                              active
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 cursor-default'
+                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
+                            }`}
+                          >
+                            {active ? 'Flashed' : 'Flash'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onUnlockFirmware(fw.level, fw.cost)}
+                            disabled={!canBuy}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded shrink-0 whitespace-nowrap ${
+                              canBuy
+                                ? 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer'
+                                : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                            }`}
+                          >
+                            {fw.cost} CR
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Column 2: Tactical HUD Software Modules */}
+              <div className="p-3.5 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-2.5">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-400">
+                  <Radar className="w-3.5 h-3.5" />
+                  <span>Tactical HUD Software</span>
+                </div>
+
+                <div className="space-y-2">
+                  {HUD_MODULES_CATALOG.map((mod) => {
+                    const unlocked = software.unlockedHudModules.includes(mod.id);
+                    const enabled = software.enabledHudModules[mod.id];
+                    const canBuy = garage.credits >= mod.cost;
+
+                    return (
+                      <div
+                        key={mod.id}
+                        className={`p-2.5 rounded-md border flex items-center justify-between gap-2 ${
+                          unlocked && enabled
+                            ? 'bg-zinc-950 border-cyan-500/60'
+                            : 'bg-zinc-950/60 border-zinc-800'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-display font-bold text-white">
+                            {mod.name}
+                          </div>
+                          <div className="text-[11px] text-zinc-400 leading-snug mt-0.5">
+                            {mod.detail}
+                          </div>
+                        </div>
+                        {unlocked ? (
+                          <button
+                            type="button"
+                            onClick={() => onToggleHudModule(mod.id)}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded shrink-0 cursor-pointer ${
+                              enabled
+                                ? 'bg-cyan-500 text-zinc-950'
+                                : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                            }`}
+                          >
+                            {enabled ? 'Enabled' : 'Disabled'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onUnlockHudModule(mod.id, mod.cost)}
+                            disabled={!canBuy}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded shrink-0 whitespace-nowrap ${
+                              canBuy
+                                ? 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer'
+                                : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                            }`}
+                          >
+                            {mod.cost} CR
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Column 3: Goggle Video Link Modes */}
+              <div className="p-3.5 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Goggle Video Link</span>
+                  </div>
+                  {software.goggleMode === 'analog-raceband' && (
+                    <button
+                      type="button"
+                      onClick={onToggleAnalogFx}
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border cursor-pointer ${
+                        software.analogFxEnabled
+                          ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                          : 'bg-zinc-950 border-zinc-700 text-zinc-400'
+                      }`}
+                    >
+                      Scanlines: {software.analogFxEnabled ? 'On' : 'Off'}
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  {GOGGLE_FEED_CATALOG.map((gf) => {
+                    const unlocked = software.unlockedGoggleModes.includes(gf.mode);
+                    const active = software.goggleMode === gf.mode;
+                    const canBuy = garage.credits >= gf.cost;
+
+                    return (
+                      <div
+                        key={gf.mode}
+                        className={`p-2.5 rounded-md border flex items-center justify-between gap-2 ${
+                          active
+                            ? 'bg-zinc-950 border-emerald-500'
+                            : 'bg-zinc-950/60 border-zinc-800'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-display font-bold text-white">
+                            {gf.name}
+                          </div>
+                          <div className="text-[11px] text-zinc-400 leading-snug mt-0.5">
+                            {gf.detail}
+                          </div>
+                        </div>
+                        {unlocked ? (
+                          <button
+                            type="button"
+                            onClick={() => onSelectGoggleMode(gf.mode)}
+                            disabled={active}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded shrink-0 cursor-pointer ${
+                              active
+                                ? 'bg-emerald-500 text-zinc-950 cursor-default'
+                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
+                            }`}
+                          >
+                            {active ? 'Linked' : 'Select'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onUnlockGoggleMode(gf.mode, gf.cost)}
+                            disabled={!canBuy}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded shrink-0 whitespace-nowrap ${
+                              canBuy
+                                ? 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer'
+                                : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                            }`}
+                          >
+                            {gf.cost} CR
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
 
@@ -522,7 +969,48 @@ export const GarageModal: React.FC<GarageModalProps> = ({
                     ))}
                   </div>
                 </div>
+
+                <div className="md:hidden">
+                  <div className="text-xs text-zinc-300 mb-1.5">
+                    Render Quality Preset
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-1 rounded-md border border-zinc-800">
+                    {(['ultra', 'high', 'performance'] as GraphicsQuality[]).map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => onChangeGraphicsQuality(q)}
+                        className={`py-1.5 text-xs font-semibold rounded transition-colors cursor-pointer capitalize ${
+                          graphicsQuality === q
+                            ? 'bg-cyan-500 text-zinc-950'
+                            : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        {q === 'performance' ? 'Perf' : q}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
+            </div>
+          )}
+
+          {tab === 'controller' && (
+            <div className="space-y-3">
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={onOpenGamepadConfig}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-zinc-950 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  <Gamepad2 className="w-3.5 h-3.5" />
+                  <span>Open Visual Stick Tester &amp; Mapper</span>
+                </button>
+              </div>
+              <GamepadCalibrationPanel
+                config={gamepadConfig}
+                onChange={onUpdateGamepad}
+              />
             </div>
           )}
         </div>
